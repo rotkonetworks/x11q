@@ -1,0 +1,24 @@
+[package]
+name = "x11quic"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rotko Networks <hello@rotko.net>"]
+description = "X11 display forwarding over QUIC - lowest latency remote desktop"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rotkonetworks/x11quic"
+keywords = ["x11", "quic", "remote-desktop", "low-latency"]
+categories = ["network-programming", "command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+quicnet = "0.2"
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
