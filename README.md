@@ -1,68 +1,87 @@
-# x11quic
+# x11q
 
-X11 display forwarding over QUIC - lowest latency remote desktop.
+X11 display forwarding over QUIC with P2P holepunching - lowest latency remote desktop.
 
 No video encoding. Your local GPU renders everything. Just raw X11 protocol over QUIC.
+
+Built on [iroh](https://iroh.computer/) for automatic NAT traversal - works behind any NAT without port forwarding.
 
 ## Install
 
 ```bash
-cargo install x11quic
+cargo install x11q
 ```
 
 Or build from source:
 ```bash
-git clone https://github.com/rotkonetworks/x11quic
-cd x11quic
+git clone https://github.com/rotkonetworks/x11q
+cd x11q
 cargo build --release
 ```
 
 ## Usage
 
-### Reverse mode (you're behind NAT, remote has public IP)
+### X11 Forwarding (run apps remotely, render locally)
 
-**Remote machine (has public IP, runs your apps):**
+**On your local machine (has your monitor):**
 ```bash
-x11quic rserver -b YOUR_PUBLIC_IP:5000
-# Note the peer ID printed
-
-# Then start your window manager:
-DISPLAY=:99 bspwm
+x11q server
+# Prints node ID and connects to relay
 ```
 
-**Local machine (behind NAT, has your monitor):**
+**On remote machine (runs your apps):**
 ```bash
-x11quic rclient PEERID@REMOTE_IP:5000 -d :0
-```
-
-### Normal mode (you have public IP)
-
-**Local machine (has public IP and monitor):**
-```bash
-x11quic server -d :0
-# Note the peer ID printed
-```
-
-**Remote machine (runs your apps):**
-```bash
-x11quic client PEERID@LOCAL_IP:5000
+x11q client NODE_ID
 # Creates DISPLAY=:99
 
-DISPLAY=:99 bspwm
+DISPLAY=:99 bspwm &
+DISPLAY=:99 alacritty
 ```
 
-### Show peer ID
+No port forwarding needed - iroh handles NAT traversal automatically via holepunching. Falls back to relay if direct connection fails.
+
+### Mirror Mode (screen sharing)
+
+**Share your screen:**
 ```bash
-x11quic id
+x11q mirror-server
+# Prints node ID
 ```
 
-## How it works
+**View remote screen:**
+```bash
+x11q mirror NODE_ID
+```
+
+### Show Your Node ID
+```bash
+x11q id
+```
+
+### Optional: Direct Address Hint
+
+If you know the remote IP, provide it for faster connection:
+```bash
+x11q client NODE_ID --addr 192.168.1.100:5000
+```
+
+## How It Works
 
 ```
-Remote: [bspwm] -> DISPLAY=:99 -> x11quic -> QUIC/UDP -> x11quic -> [local Xorg]
+Remote: [bspwm] -> DISPLAY=:99 -> x11q client
+                                      |
+                          (iroh: holepunch or relay)
+                                      |
+Local:  [Xorg :0] <- x11q server <----+
 ```
 
-X11 protocol is forwarded over QUIC (UDP-based). Your local X server and GPU do all the rendering. Result: minimal latency, no compression artifacts.
+1. Both sides connect to iroh relay network
+2. iroh attempts UDP holepunch for direct P2P
+3. Falls back to relay if holepunch fails
+4. X11 protocol streams over QUIC
+5. Your local GPU renders everything
+
+Result: minimal latency, no compression artifacts, works behind any NAT.
 
 ## Requirements
 

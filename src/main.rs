@@ -1,35 +1,40 @@
-//! x11quic - X11 display forwarding over QUIC
+//! x11q - X11 display forwarding over QUIC with P2P holepunching
 //!
 //! Lowest latency remote desktop: X11 protocol over QUIC.
 //! No video encoding - your local GPU renders everything.
+//! Built-in NAT traversal via iroh holepunching.
 //!
 //! # Modes
 //!
-//! **Normal mode** (you have public IP):
+//! **P2P mode** (automatic holepunching):
 //! ```text
-//! [remote: bspwm] → DISPLAY=:99 → x11quic client
-//!      → quicnet → x11quic server → [local Xorg :0]
+//! [remote: bspwm] → DISPLAY=:99 → x11q client
+//!      → iroh (holepunch/relay) → x11q server → [local Xorg :0]
 //! ```
 //!
-//! **Reverse mode** (you're behind NAT, remote has public IP):
+//! **Mirror mode** (screen sharing):
 //! ```text
-//! [remote: bspwm] → DISPLAY=:99 → x11quic rserver
-//!      ← quicnet ← x11quic rclient → [local Xorg :0]
+//! [this screen] → capture → x11q mirror-server
+//!      → iroh → x11q mirror → [remote window]
 //! ```
+
+mod mirror;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use quicnet::{Identity, Peer, PeerId};
+use iroh::{Endpoint, NodeId};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
 const X11_UNIX_DIR: &str = "/tmp/.X11-unix";
 const X11_TCP_BASE: u16 = 6000;
+const ALPN: &[u8] = b"x11quic/1";
 
 #[derive(Parser)]
-#[command(name = "x11quic")]
-#[command(about = "X11 display forwarding over QUIC - lowest latency remote desktop")]
+#[command(name = "x11q")]
+#[command(about = "X11 display forwarding over QUIC with P2P holepunching")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -38,77 +43,91 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run server on local machine (you have public IP)
-    /// Accepts connections and forwards X11 to local display
+    /// Run server on local machine (accepts connections)
+    /// Forwards X11 to local display, works behind NAT via holepunching
     Server {
         /// Local X display to forward to (e.g., :0)
         #[arg(short, long, default_value = ":0")]
         display: String,
 
-        /// Address to bind (e.g., 0.0.0.0:5000)
-        #[arg(short, long, default_value = "0.0.0.0:5000")]
-        bind: String,
+        /// Optional bind address (e.g., 0.0.0.0:5000)
+        #[arg(short, long)]
+        bind: Option<String>,
     },
 
     /// Run client on remote machine (connect to server)
     /// Creates DISPLAY=:99 for apps to use
     Client {
-        /// Server address as PEERID@host:port
-        #[arg(value_name = "PEER@HOST:PORT")]
-        target: String,
+        /// Server NodeId (base32 public key)
+        #[arg(value_name = "NODE_ID")]
+        node_id: String,
 
         /// Virtual display number to create
         #[arg(short, long, default_value = "99")]
         display: u32,
+
+        /// Direct address hint (optional, helps with faster connection)
+        #[arg(long)]
+        addr: Option<String>,
     },
 
-    /// Run reverse server on remote machine (remote has public IP)
-    /// Creates DISPLAY=:99 for apps, waits for rclient to connect
-    #[command(name = "rserver")]
-    ReverseServer {
-        /// Address to bind (use public IP for proper routing)
-        #[arg(short, long, default_value = "0.0.0.0:5000")]
-        bind: String,
+    /// Show node identity (generates if needed)
+    Id,
 
-        /// Virtual display number to create
-        #[arg(short, long, default_value = "99")]
-        display: u32,
-    },
-
-    /// Run reverse client on local machine (you're behind NAT)
-    /// Dials out to rserver and forwards X11 to local display
-    #[command(name = "rclient")]
-    ReverseClient {
-        /// Remote rserver address as PEERID@host:port
-        #[arg(value_name = "PEER@HOST:PORT")]
-        target: String,
-
-        /// Local X display to forward to (e.g., :0)
+    /// Share your screen (mirror server)
+    /// Captures display and streams to connected viewers
+    #[command(name = "mirror-server")]
+    MirrorServer {
+        /// X display to capture (e.g., :0)
         #[arg(short, long, default_value = ":0")]
         display: String,
+
+        /// Optional bind address
+        #[arg(short, long)]
+        bind: Option<String>,
     },
 
-    /// Show peer identity (generates if needed)
-    Id,
+    /// View a remote screen (mirror client)
+    /// Connects to mirror-server and displays in a window
+    Mirror {
+        /// Server NodeId (base32 public key)
+        #[arg(value_name = "NODE_ID")]
+        node_id: String,
+
+        /// Direct address hint (optional)
+        #[arg(long)]
+        addr: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install crypto provider");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("iroh=warn".parse().unwrap())
+                .add_directive("quinn=warn".parse().unwrap()),
+        )
+        .init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server { display, bind } => run_server(&display, &bind).await,
-        Commands::Client { target, display } => run_client(&target, display).await,
-        Commands::ReverseServer { bind, display } => run_reverse_server(&bind, display).await,
-        Commands::ReverseClient { target, display } => run_reverse_client(&target, &display).await,
+        Commands::Server { display, bind } => run_server(&display, bind.as_deref()).await,
+        Commands::Client { node_id, display, addr } => {
+            run_client(&node_id, display, addr.as_deref()).await
+        }
         Commands::Id => {
-            let identity = Identity::load_or_generate()?;
-            println!("{}", identity.peer_id());
+            let endpoint = Endpoint::builder().alpns(vec![ALPN.to_vec()]).bind().await?;
+            println!("{}", endpoint.node_id());
+            endpoint.close().await;
             Ok(())
+        }
+        Commands::MirrorServer { display, bind } => {
+            mirror::run_mirror_server(&display, bind.as_deref()).await
+        }
+        Commands::Mirror { node_id, addr } => {
+            mirror::run_mirror_client(&node_id, addr.as_deref()).await
         }
     }
 }
@@ -127,8 +146,13 @@ fn x11_paths(display_num: u32) -> (String, String, bool) {
     (socket, tcp, use_unix)
 }
 
-// Server: runs on local machine (with public IP and monitor)
-async fn run_server(display: &str, bind: &str) -> Result<()> {
+/// Parse NodeId from string
+fn parse_node_id(s: &str) -> Result<NodeId> {
+    NodeId::from_str(s).context("invalid node id (expected base32 public key)")
+}
+
+// Server: runs on local machine with display
+async fn run_server(display: &str, bind: Option<&str>) -> Result<()> {
     let display_num = parse_display(display)?;
     let (x11_socket, x11_tcp, use_unix) = x11_paths(display_num);
 
@@ -138,35 +162,51 @@ async fn run_server(display: &str, bind: &str) -> Result<()> {
         if use_unix { "unix" } else { "tcp" }
     );
 
-    let identity = Identity::load_or_generate()?;
-    let peer = Peer::new(bind.parse()?, identity)?;
+    // Build endpoint with optional bind address
+    let mut builder = Endpoint::builder().alpns(vec![ALPN.to_vec()]);
 
-    eprintln!("x11quic server on {}", peer.local_addr()?);
-    eprintln!("peer id: {}", peer.identity().peer_id());
-    eprintln!("waiting for remote to connect...");
+    if let Some(addr) = bind {
+        builder = builder.bind_addr_v4(addr.parse().context("invalid bind address")?);
+    }
 
-    while let Some(incoming) = peer.accept().await {
+    let endpoint = builder.bind().await?;
+
+    eprintln!("x11q server started");
+    eprintln!("node id: {}", endpoint.node_id());
+
+    // Wait for relay connection and print info
+    let relay_url = endpoint.home_relay().initialized().await?;
+    eprintln!("relay: {}", relay_url);
+    eprintln!("holepunching ready - waiting for connections...");
+    eprintln!();
+    eprintln!("connect with: x11q client {}", endpoint.node_id());
+
+    // Accept connections
+    while let Some(incoming) = endpoint.accept().await {
+        let conn = incoming.await?;
+        let remote_id = conn.remote_node_id()?;
+        eprintln!("[{}] connected", &remote_id.to_string()[..8]);
+
         let x11_socket = x11_socket.clone();
         let x11_tcp = x11_tcp.clone();
+
         tokio::spawn(async move {
-            if let Err(e) = handle_server_connection(incoming, &x11_socket, &x11_tcp, use_unix).await
-            {
-                eprintln!("session error: {e}");
+            if let Err(e) = handle_server_connection(conn, &x11_socket, &x11_tcp, use_unix, remote_id).await {
+                eprintln!("[{}] error: {e}", &remote_id.to_string()[..8]);
             }
         });
     }
+
     Ok(())
 }
 
 async fn handle_server_connection(
-    incoming: quicnet::IncomingConnection,
+    conn: iroh::endpoint::Connection,
     x11_socket: &str,
     x11_tcp: &str,
     use_unix: bool,
+    remote_id: NodeId,
 ) -> Result<()> {
-    let (conn, peer_id) = incoming.accept().await?;
-    eprintln!("[{}] connected", peer_id.short());
-
     loop {
         let (quic_send, quic_recv) = match conn.accept_bi().await {
             Ok(s) => s,
@@ -188,22 +228,35 @@ async fn handle_server_connection(
         });
     }
 
-    eprintln!("[{}] disconnected", peer_id.short());
+    eprintln!("[{}] disconnected", &remote_id.to_string()[..8]);
     Ok(())
 }
 
 // Client: runs on remote machine, creates virtual display
-async fn run_client(target: &str, display_num: u32) -> Result<()> {
-    let (peer_id, addr) = parse_target(target)?;
+async fn run_client(node_id: &str, display_num: u32, addr_hint: Option<&str>) -> Result<()> {
+    let remote_node_id = parse_node_id(node_id)?;
 
-    let identity = Identity::load_or_generate()?;
-    let peer = Peer::new("[::]:0".parse()?, identity)?;
+    let endpoint = Endpoint::builder()
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
 
-    eprintln!("connecting to {} @ {}", peer_id.short(), addr);
+    eprintln!("connecting to {}...", &node_id[..8.min(node_id.len())]);
 
-    let (conn, remote_id) = peer.dial(addr.parse()?, Some(&peer_id)).await?;
+    // Build node address
+    let mut node_addr = iroh::NodeAddr::new(remote_node_id);
+
+    // Add direct address hint if provided
+    if let Some(addr) = addr_hint {
+        node_addr = node_addr.with_direct_addresses([addr.parse().context("invalid address hint")?]);
+    }
+
+    // Connect (iroh handles holepunching automatically)
+    let conn = endpoint.connect(node_addr, ALPN).await?;
+    let remote_id = conn.remote_node_id()?;
     let conn = Arc::new(conn);
-    eprintln!("connected to {}", remote_id.short());
+
+    eprintln!("connected to {}", &remote_id.to_string()[..8]);
 
     let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
 
@@ -231,127 +284,7 @@ async fn run_client(target: &str, display_num: u32) -> Result<()> {
     }
 }
 
-// Reverse server: runs on remote (has public IP, runs bspwm)
-async fn run_reverse_server(bind: &str, display_num: u32) -> Result<()> {
-    let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
-
-    let identity = Identity::load_or_generate()?;
-    let peer = Peer::new(bind.parse()?, identity)?;
-
-    eprintln!("x11quic rserver on {}", peer.local_addr()?);
-    eprintln!("peer id: {}", peer.identity().peer_id());
-    eprintln!();
-    eprintln!("X11 ready: DISPLAY=:{}", display_num);
-
-    loop {
-        eprintln!("waiting for rclient...");
-
-        let incoming = match peer.accept().await {
-            Some(i) => i,
-            None => {
-                eprintln!("accept failed, retrying...");
-                continue;
-            }
-        };
-
-        let (conn, peer_id) = match incoming.accept().await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("connection error: {e}");
-                continue;
-            }
-        };
-
-        let conn = Arc::new(conn);
-        eprintln!("[{}] connected - X11 forwarding active", peer_id.short());
-
-        loop {
-            tokio::select! {
-                result = unix_listener.accept() => {
-                    if let Ok((stream, _)) = result {
-                        let conn = Arc::clone(&conn);
-                        tokio::spawn(async move {
-                            if let Err(e) = forward_to_quic_unix(stream, conn).await {
-                                eprintln!("x11 error: {e}");
-                            }
-                        });
-                    }
-                }
-                result = tcp_listener.accept() => {
-                    if let Ok((stream, _)) = result {
-                        let conn = Arc::clone(&conn);
-                        tokio::spawn(async move {
-                            if let Err(e) = forward_to_quic_tcp(stream, conn).await {
-                                eprintln!("x11 error: {e}");
-                            }
-                        });
-                    }
-                }
-            }
-
-            if conn.close_reason().is_some() {
-                eprintln!("[{}] disconnected", peer_id.short());
-                break;
-            }
-        }
-    }
-}
-
-// Reverse client: runs on local machine (behind NAT, has monitor)
-async fn run_reverse_client(target: &str, display: &str) -> Result<()> {
-    let display_num = parse_display(display)?;
-    let (x11_socket, x11_tcp, use_unix) = x11_paths(display_num);
-
-    eprintln!(
-        "X11 target: {} ({})",
-        if use_unix { &x11_socket } else { &x11_tcp },
-        if use_unix { "unix" } else { "tcp" }
-    );
-
-    let (peer_id, addr) = parse_target(target)?;
-
-    let identity = Identity::load_or_generate()?;
-    let peer = Peer::new("[::]:0".parse()?, identity)?;
-
-    eprintln!("connecting to {} @ {}", peer_id.short(), addr);
-
-    let (conn, remote_id) = peer.dial(addr.parse()?, Some(&peer_id)).await?;
-    eprintln!("connected to {} - forwarding X11 to :{}", remote_id.short(), display_num);
-
-    loop {
-        let (quic_send, quic_recv) = match conn.accept_bi().await {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-
-        let x11_socket = x11_socket.clone();
-        let x11_tcp = x11_tcp.clone();
-
-        tokio::spawn(async move {
-            let result = if use_unix {
-                proxy_to_unix(quic_send, quic_recv, &x11_socket).await
-            } else {
-                proxy_to_tcp(quic_send, quic_recv, &x11_tcp).await
-            };
-            if let Err(e) = result {
-                eprintln!("stream error: {e}");
-            }
-        });
-    }
-
-    eprintln!("connection closed");
-    Ok(())
-}
-
 // Helper functions
-
-fn parse_target(target: &str) -> Result<(PeerId, &str)> {
-    let (peer_id_str, addr) = target
-        .split_once('@')
-        .ok_or_else(|| anyhow::anyhow!("target must be PEERID@host:port"))?;
-    let peer_id: PeerId = peer_id_str.parse().context("invalid peer id")?;
-    Ok((peer_id, addr))
-}
 
 async fn create_x11_listeners(display_num: u32) -> Result<(UnixListener, TcpListener)> {
     let x11_socket = format!("{}/X{}", X11_UNIX_DIR, display_num);
@@ -370,8 +303,8 @@ async fn create_x11_listeners(display_num: u32) -> Result<(UnixListener, TcpList
 }
 
 async fn proxy_to_unix(
-    mut quic_send: quinn::SendStream,
-    mut quic_recv: quinn::RecvStream,
+    mut quic_send: iroh::endpoint::SendStream,
+    mut quic_recv: iroh::endpoint::RecvStream,
     socket_path: &str,
 ) -> Result<()> {
     let unix = UnixStream::connect(socket_path).await?;
@@ -385,8 +318,8 @@ async fn proxy_to_unix(
 }
 
 async fn proxy_to_tcp(
-    mut quic_send: quinn::SendStream,
-    mut quic_recv: quinn::RecvStream,
+    mut quic_send: iroh::endpoint::SendStream,
+    mut quic_recv: iroh::endpoint::RecvStream,
     addr: &str,
 ) -> Result<()> {
     let tcp = TcpStream::connect(addr).await?;
@@ -399,7 +332,7 @@ async fn proxy_to_tcp(
     Ok(())
 }
 
-async fn forward_to_quic_unix(unix: UnixStream, conn: Arc<quinn::Connection>) -> Result<()> {
+async fn forward_to_quic_unix(unix: UnixStream, conn: Arc<iroh::endpoint::Connection>) -> Result<()> {
     let (quic_send, quic_recv) = conn.open_bi().await?;
     let (mut unix_read, mut unix_write) = unix.into_split();
     let (mut quic_send, mut quic_recv) = (quic_send, quic_recv);
@@ -411,7 +344,7 @@ async fn forward_to_quic_unix(unix: UnixStream, conn: Arc<quinn::Connection>) ->
     Ok(())
 }
 
-async fn forward_to_quic_tcp(tcp: TcpStream, conn: Arc<quinn::Connection>) -> Result<()> {
+async fn forward_to_quic_tcp(tcp: TcpStream, conn: Arc<iroh::endpoint::Connection>) -> Result<()> {
     let (quic_send, quic_recv) = conn.open_bi().await?;
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     let (mut quic_send, mut quic_recv) = (quic_send, quic_recv);

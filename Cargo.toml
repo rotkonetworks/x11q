@@ -1,22 +1,29 @@
 [package]
-name = "x11quic"
-version = "0.1.0"
+name = "x11q"
+version = "0.2.0"
 edition = "2021"
-authors = ["Rotko Networks <hello@rotko.net>"]
-description = "X11 display forwarding over QUIC - lowest latency remote desktop"
+authors = ["Rotko Networks <hq@rotko.net>"]
+description = "X11 display forwarding over QUIC with P2P holepunching - lowest latency remote desktop"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rotkonetworks/x11quic"
-keywords = ["x11", "quic", "remote-desktop", "low-latency"]
+repository = "https://github.com/rotkonetworks/x11q"
+keywords = ["x11", "quic", "remote-desktop", "low-latency", "p2p"]
 categories = ["network-programming", "command-line-utilities"]
 readme = "README.md"
 
 [dependencies]
-quicnet = "0.2"
+# P2P networking with holepunching
+iroh = "0.35"
+iroh-base = "0.35"
+
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Mirror mode dependencies
+x11rb = { version = "0.13", features = ["shm", "damage", "xtest", "randr"] }
+minifb = "0.27"
+zstd = "0.13"
 
 [profile.release]
 lto = true
