@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>x11q - X11 in browser</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: monospace;
+            color: #ccc;
+        }
+        #status {
+            margin-bottom: 10px;
+            padding: 5px 10px;
+            background: #333;
+            border-radius: 4px;
+        }
+        #canvas {
+            border: 1px solid #444;
+            cursor: default;
+        }
+        .connected { color: #4f4; }
+        .disconnected { color: #f44; }
+        .connecting { color: #ff4; }
+    </style>
+</head>
+<body>
+    <div id="status" class="disconnected">disconnected</div>
+    <canvas id="canvas" width="1280" height="720"></canvas>
+    <script type="module" src="main.js"></script>
+</body>
+</html>

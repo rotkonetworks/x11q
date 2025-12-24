@@ -20,6 +20,7 @@
 
 mod mirror;
 mod rendezvous;
+mod web;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -116,6 +117,22 @@ enum Commands {
         #[arg(long)]
         addr: Option<String>,
     },
+
+    /// Run X11 server in browser via WebSocket
+    /// Starts web server, X11 clients connect locally, rendered in browser
+    Web {
+        /// Virtual display number to create
+        #[arg(short, long, default_value = "99")]
+        display: u32,
+
+        /// HTTP port for web server
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+
+        /// Path to www files (default: x11q-web/www)
+        #[arg(long)]
+        www: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -148,6 +165,9 @@ async fn main() -> Result<()> {
         }
         Commands::Mirror { node_id, addr } => {
             mirror::run_mirror_client(&node_id, addr.as_deref()).await
+        }
+        Commands::Web { display, port, www } => {
+            web::run_web(display, port, www.as_deref()).await
         }
     }
 }
