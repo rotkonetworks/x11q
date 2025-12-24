@@ -1,6 +1,6 @@
 # Maintainer: Rotko Networks <hq@rotko.net>
 pkgname=x11q
-pkgver=0.2.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="X11 display forwarding over QUIC with P2P holepunching"
 arch=('x86_64')
