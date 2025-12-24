@@ -1,0 +1,64 @@
+[package]
+name = "x11q-web"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rotko Networks <hq@rotko.net>"]
+description = "X11 server in WebAssembly with WebGPU rendering"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# X11 protocol types (no IO, just parsing)
+x11rb-protocol = "0.13"
+
+# WebGPU rendering
+wgpu = { version = "24", features = ["webgpu"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "KeyboardEvent",
+    "MouseEvent",
+    "GpuCanvasContext",
+    "Navigator",
+    "Gpu",
+] }
+
+# async
+futures = "0.3"
+
+# parallelism for wasm (requires nightly + atomics)
+# wasm-bindgen-rayon = "1"
+# rayon = "1"
+
+# logging
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
+
+# bytes handling
+bytes = "1"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+lto = true
+opt-level = 3
+
+# SIMD128 + threads for wasm
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4", "--enable-simd", "--enable-threads"]
