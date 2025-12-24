@@ -21,31 +21,50 @@ cargo build --release
 
 ## Usage
 
-### X11 Forwarding (run apps remotely, render locally)
+### Easy Mode (word codes)
+
+Like magic-wormhole - just share a short code to connect.
 
 **On your local machine (has your monitor):**
 ```bash
-x11q server
-# Prints node ID and connects to relay
+x11q serve
+# Prints: x11q join 7-tiger-lamp
 ```
 
 **On remote machine (runs your apps):**
 ```bash
-x11q client NODE_ID
+x11q join 7-tiger-lamp
+# Authenticated via SPAKE2 PAKE
 # Creates DISPLAY=:99
 
 DISPLAY=:99 bspwm &
 DISPLAY=:99 alacritty
 ```
 
-No port forwarding needed - iroh handles NAT traversal automatically via holepunching. Falls back to relay if direct connection fails.
+The word code is published to mainline DHT (bittorrent) - no central server needed.
+Connection is authenticated using SPAKE2 password-authenticated key exchange.
+
+### Direct Mode (node IDs)
+
+For persistent setups or when you want to skip DHT lookup.
+
+**On your local machine:**
+```bash
+x11q server
+# Prints node ID
+```
+
+**On remote machine:**
+```bash
+x11q client NODE_ID
+# Creates DISPLAY=:99
+```
 
 ### Mirror Mode (screen sharing)
 
 **Share your screen:**
 ```bash
 x11q mirror-server
-# Prints node ID
 ```
 
 **View remote screen:**
@@ -58,35 +77,36 @@ x11q mirror NODE_ID
 x11q id
 ```
 
-### Optional: Direct Address Hint
-
-If you know the remote IP, provide it for faster connection:
-```bash
-x11q client NODE_ID --addr 192.168.1.100:5000
-```
-
 ## How It Works
 
 ```
-Remote: [bspwm] -> DISPLAY=:99 -> x11q client
+Remote: [bspwm] -> DISPLAY=:99 -> x11q join
                                       |
-                          (iroh: holepunch or relay)
+                      (iroh: holepunch via mainline DHT)
                                       |
-Local:  [Xorg :0] <- x11q server <----+
+Local:  [Xorg :0] <- x11q serve <-----+
 ```
 
-1. Both sides connect to iroh relay network
-2. iroh attempts UDP holepunch for direct P2P
-3. Falls back to relay if holepunch fails
-4. X11 protocol streams over QUIC
-5. Your local GPU renders everything
+1. `serve` generates word code, publishes node ID to mainline DHT
+2. `join` looks up node ID from DHT using word code
+3. Both sides perform SPAKE2 key exchange to authenticate
+4. iroh establishes P2P connection (holepunch or relay)
+5. X11 protocol streams over QUIC
+6. Your local GPU renders everything
 
 Result: minimal latency, no compression artifacts, works behind any NAT.
+
+## Security
+
+- Word codes have ~16 bits of entropy (2 words from 256-word list)
+- SPAKE2 PAKE prevents MITM even if attacker knows the code
+- All traffic encrypted via QUIC/TLS
+- DHT records expire after 2 minutes
 
 ## Requirements
 
 - Linux with X11
-- Rust 1.70+
+- Rust 1.81+
 
 ## License
 

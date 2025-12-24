@@ -4,21 +4,22 @@
 //! No video encoding - your local GPU renders everything.
 //! Built-in NAT traversal via iroh holepunching.
 //!
-//! # Modes
+//! # Easy mode (word codes)
 //!
-//! **P2P mode** (automatic holepunching):
 //! ```text
-//! [remote: bspwm] → DISPLAY=:99 → x11q client
-//!      → iroh (holepunch/relay) → x11q server → [local Xorg :0]
+//! local:  x11q serve           → prints "7-tiger-lamp"
+//! remote: x11q join 7-tiger-lamp  → DISPLAY=:99 ready
 //! ```
 //!
-//! **Mirror mode** (screen sharing):
+//! # Direct mode (node ids)
+//!
 //! ```text
-//! [this screen] → capture → x11q mirror-server
-//!      → iroh → x11q mirror → [remote window]
+//! local:  x11q server          → prints node id
+//! remote: x11q client <nodeid> → DISPLAY=:99 ready
 //! ```
 
 mod mirror;
+mod rendezvous;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -43,8 +44,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run server on local machine (accepts connections)
-    /// Forwards X11 to local display, works behind NAT via holepunching
+    /// Easy mode: serve X11 with a word code (e.g., "7-tiger-lamp")
+    /// Publishes to DHT, authenticates with PAKE
+    Serve {
+        /// Local X display to forward (e.g., :0)
+        #[arg(short, long, default_value = ":0")]
+        display: String,
+    },
+
+    /// Easy mode: join using a word code
+    /// Looks up DHT, authenticates with PAKE, creates DISPLAY=:99
+    Join {
+        /// Word code from server (e.g., "7-tiger-lamp")
+        code: String,
+
+        /// Virtual display number to create
+        #[arg(short, long, default_value = "99")]
+        display: u32,
+    },
+
+    /// Direct mode: server (use node id instead of word code)
     Server {
         /// Local X display to forward to (e.g., :0)
         #[arg(short, long, default_value = ":0")]
@@ -55,8 +74,7 @@ enum Commands {
         bind: Option<String>,
     },
 
-    /// Run client on remote machine (connect to server)
-    /// Creates DISPLAY=:99 for apps to use
+    /// Direct mode: client (use node id instead of word code)
     Client {
         /// Server NodeId (base32 public key)
         #[arg(value_name = "NODE_ID")]
@@ -66,12 +84,12 @@ enum Commands {
         #[arg(short, long, default_value = "99")]
         display: u32,
 
-        /// Direct address hint (optional, helps with faster connection)
+        /// Direct address hint (optional)
         #[arg(long)]
         addr: Option<String>,
     },
 
-    /// Show node identity (generates if needed)
+    /// Show node identity
     Id,
 
     /// Share your screen (mirror server)
@@ -113,6 +131,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Serve { display } => run_serve(&display).await,
+        Commands::Join { code, display } => run_join(&code, display).await,
         Commands::Server { display, bind } => run_server(&display, bind.as_deref()).await,
         Commands::Client { node_id, display, addr } => {
             run_client(&node_id, display, addr.as_deref()).await
@@ -149,6 +169,126 @@ fn x11_paths(display_num: u32) -> (String, String, bool) {
 /// Parse NodeId from string
 fn parse_node_id(s: &str) -> Result<NodeId> {
     NodeId::from_str(s).context("invalid node id (expected base32 public key)")
+}
+
+// Easy mode: serve with word code + PAKE
+async fn run_serve(display: &str) -> Result<()> {
+    let display_num = parse_display(display)?;
+    let (x11_socket, x11_tcp, use_unix) = x11_paths(display_num);
+
+    // generate word code and publish to dht
+    let code = rendezvous::generate_code();
+
+    let endpoint = Endpoint::builder()
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
+
+    let node_id = endpoint.node_id();
+
+    eprintln!("publishing to dht...");
+    rendezvous::publish_nodeid(&code, node_id).await?;
+
+    eprintln!();
+    eprintln!("  x11q join {}", code);
+    eprintln!();
+    eprintln!("waiting for connection...");
+
+    // accept connection
+    let incoming = endpoint.accept().await.context("no incoming connection")?;
+    let conn = incoming.await?;
+
+    // do pake handshake
+    let pake = rendezvous::PakeServer::new(&code);
+    let (mut send, mut recv) = conn.open_bi().await?;
+
+    // send our pake message
+    let msg = pake.message();
+    send.write_all(&(msg.len() as u32).to_le_bytes()).await?;
+    send.write_all(msg).await?;
+
+    // receive client's pake message
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut client_msg = vec![0u8; len];
+    recv.read_exact(&mut client_msg).await?;
+
+    // verify pake
+    let _shared_key = pake.finish(&client_msg)?;
+    eprintln!("authenticated!");
+
+    eprintln!(
+        "X11: {} ({})",
+        if use_unix { &x11_socket } else { &x11_tcp },
+        if use_unix { "unix" } else { "tcp" }
+    );
+
+    // now proxy x11
+    let remote_id = conn.remote_node_id()?;
+    handle_server_connection(conn, &x11_socket, &x11_tcp, use_unix, remote_id).await
+}
+
+// Easy mode: join with word code + PAKE
+async fn run_join(code: &str, display_num: u32) -> Result<()> {
+    eprintln!("looking up {} on dht...", code);
+
+    let remote_node_id = rendezvous::resolve_nodeid(code).await?;
+    eprintln!("found node: {}", &remote_node_id.to_string()[..8]);
+
+    let endpoint = Endpoint::builder()
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
+
+    let node_addr = iroh::NodeAddr::new(remote_node_id);
+    let conn = endpoint.connect(node_addr, ALPN).await?;
+
+    // do pake handshake
+    let pake = rendezvous::PakeClient::new(code);
+    let (mut send, mut recv) = conn.accept_bi().await?;
+
+    // receive server's pake message
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut server_msg = vec![0u8; len];
+    recv.read_exact(&mut server_msg).await?;
+
+    // send our pake message
+    let msg = pake.message();
+    send.write_all(&(msg.len() as u32).to_le_bytes()).await?;
+    send.write_all(msg).await?;
+
+    // verify pake
+    let _shared_key = pake.finish(&server_msg)?;
+    eprintln!("authenticated!");
+
+    let conn = Arc::new(conn);
+    let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
+
+    eprintln!("DISPLAY=:{} ready", display_num);
+
+    loop {
+        tokio::select! {
+            Ok((stream, _)) = unix_listener.accept() => {
+                let conn = Arc::clone(&conn);
+                tokio::spawn(async move {
+                    if let Err(e) = forward_to_quic_unix(stream, conn).await {
+                        eprintln!("x11 error: {e}");
+                    }
+                });
+            }
+            Ok((stream, _)) = tcp_listener.accept() => {
+                let conn = Arc::clone(&conn);
+                tokio::spawn(async move {
+                    if let Err(e) = forward_to_quic_tcp(stream, conn).await {
+                        eprintln!("x11 error: {e}");
+                    }
+                });
+            }
+        }
+    }
 }
 
 // Server: runs on local machine with display
