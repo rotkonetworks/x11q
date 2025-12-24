@@ -15,18 +15,36 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 const X11_UNIX_DIR: &str = "/tmp/.X11-unix";
 const X11_TCP_BASE: u16 = 6000;
 
+/// Shared state for single-client X11 connection
 struct X11Bridge {
-    /// Data from X11 clients to browser
-    to_browser: broadcast::Sender<Vec<u8>>,
-    /// Data from browser to X11 clients
-    from_browser: broadcast::Sender<Vec<u8>>,
+    /// Send data to browser (X11 requests from client)
+    to_browser_tx: mpsc::Sender<Vec<u8>>,
+    /// Receive data from browser (X11 replies/events)
+    from_browser_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    /// Send data from browser
+    from_browser_tx: mpsc::Sender<Vec<u8>>,
+    /// Receive data for browser
+    to_browser_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+}
+
+impl X11Bridge {
+    fn new() -> Self {
+        let (to_browser_tx, to_browser_rx) = mpsc::channel::<Vec<u8>>(1024);
+        let (from_browser_tx, from_browser_rx) = mpsc::channel::<Vec<u8>>(1024);
+        Self {
+            to_browser_tx,
+            from_browser_rx: Arc::new(Mutex::new(from_browser_rx)),
+            from_browser_tx,
+            to_browser_rx: Arc::new(Mutex::new(to_browser_rx)),
+        }
+    }
 }
 
 /// Run web server mode - serves x11q-web and bridges X11 connections
@@ -51,16 +69,8 @@ pub async fn run_web(display_num: u32, port: u16, www_path: Option<&str>) -> Res
     eprintln!("export DISPLAY=:{}", display_num);
     eprintln!();
 
-    // Create broadcast channels for X11 <-> browser communication
-    let (to_browser_tx, _) = broadcast::channel::<Vec<u8>>(1024);
-    let (from_browser_tx, _) = broadcast::channel::<Vec<u8>>(1024);
+    let bridge = Arc::new(X11Bridge::new());
 
-    let bridge = Arc::new(X11Bridge {
-        to_browser: to_browser_tx,
-        from_browser: from_browser_tx,
-    });
-
-    // Clone for handlers
     let bridge_for_ws = Arc::clone(&bridge);
     let bridge_for_unix = Arc::clone(&bridge);
     let bridge_for_tcp = Arc::clone(&bridge);
@@ -122,21 +132,24 @@ async fn handle_websocket(socket: WebSocket, bridge: Arc<X11Bridge>) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Subscribe to X11 data
-    let mut x11_rx = bridge.to_browser.subscribe();
-    let browser_tx = bridge.from_browser.clone();
+    let to_browser_rx = Arc::clone(&bridge.to_browser_rx);
+    let from_browser_tx = bridge.from_browser_tx.clone();
 
     // Task to send X11 data to browser
     let send_task = tokio::spawn(async move {
         loop {
-            match x11_rx.recv().await {
-                Ok(data) => {
+            let data = {
+                let mut rx = to_browser_rx.lock().await;
+                rx.recv().await
+            };
+            match data {
+                Some(data) => {
+                    eprintln!("-> browser: {} bytes", data.len());
                     if ws_tx.send(Message::Binary(data.into())).await.is_err() {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                None => break,
             }
         }
     });
@@ -146,7 +159,8 @@ async fn handle_websocket(socket: WebSocket, bridge: Arc<X11Bridge>) {
         while let Some(Ok(msg)) = ws_rx.next().await {
             match msg {
                 Message::Binary(data) => {
-                    let _ = browser_tx.send(data.to_vec());
+                    eprintln!("<- browser: {} bytes", data.len());
+                    let _ = from_browser_tx.send(data.to_vec()).await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -165,33 +179,62 @@ async fn handle_websocket(socket: WebSocket, bridge: Arc<X11Bridge>) {
 async fn handle_x11_unix(mut stream: UnixStream, bridge: Arc<X11Bridge>) {
     eprintln!("x11 client connected (unix)");
 
-    let mut browser_rx = bridge.from_browser.subscribe();
-    let to_browser = bridge.to_browser.clone();
+    let from_browser_rx = Arc::clone(&bridge.from_browser_rx);
+    let to_browser_tx = bridge.to_browser_tx.clone();
+
+    // Drain any old data from the browser channel
+    {
+        let mut rx = from_browser_rx.lock().await;
+        while rx.try_recv().is_ok() {
+            // discard old data
+        }
+    }
 
     let mut buf = vec![0u8; 65536];
+    let mut sent_request = false;
 
     loop {
         tokio::select! {
+            biased; // prefer reading from x11 client first
+
             // Read from X11 client, send to browser
             result = stream.read(&mut buf) => {
                 match result {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let _ = to_browser.send(buf[..n].to_vec());
+                    Ok(0) => {
+                        eprintln!("x11 client EOF");
+                        break;
                     }
-                    Err(_) => break,
+                    Ok(n) => {
+                        eprintln!("x11 -> browser: {} bytes", n);
+                        if to_browser_tx.send(buf[..n].to_vec()).await.is_err() {
+                            eprintln!("failed to send to browser");
+                            break;
+                        }
+                        sent_request = true;
+                    }
+                    Err(e) => {
+                        eprintln!("x11 read error: {}", e);
+                        break;
+                    }
                 }
             }
-            // Read from browser, send to X11 client
-            result = browser_rx.recv() => {
+            // Read from browser, send to X11 client - only after we've sent at least one request
+            result = async {
+                let mut rx = from_browser_rx.lock().await;
+                rx.recv().await
+            }, if sent_request => {
                 match result {
-                    Ok(data) => {
+                    Some(data) => {
+                        eprintln!("browser -> x11: {} bytes", data.len());
                         if stream.write_all(&data).await.is_err() {
+                            eprintln!("x11 write error");
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    None => {
+                        eprintln!("browser channel closed");
+                        break;
+                    }
                 }
             }
         }
@@ -203,37 +246,41 @@ async fn handle_x11_unix(mut stream: UnixStream, bridge: Arc<X11Bridge>) {
 async fn handle_x11_tcp(mut stream: TcpStream, bridge: Arc<X11Bridge>) {
     eprintln!("x11 client connected (tcp)");
 
-    let mut browser_rx = bridge.from_browser.subscribe();
-    let to_browser = bridge.to_browser.clone();
+    let from_browser_rx = Arc::clone(&bridge.from_browser_rx);
+    let to_browser_tx = bridge.to_browser_tx.clone();
 
     let mut buf = vec![0u8; 65536];
 
     loop {
         tokio::select! {
-            // Read from X11 client, send to browser
             result = stream.read(&mut buf) => {
                 match result {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = to_browser.send(buf[..n].to_vec());
+                        eprintln!("x11 tcp -> browser: {} bytes", n);
+                        if to_browser_tx.send(buf[..n].to_vec()).await.is_err() {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
             }
-            // Read from browser, send to X11 client
-            result = browser_rx.recv() => {
+            result = async {
+                let mut rx = from_browser_rx.lock().await;
+                rx.recv().await
+            } => {
                 match result {
-                    Ok(data) => {
+                    Some(data) => {
+                        eprintln!("browser -> x11 tcp: {} bytes", data.len());
                         if stream.write_all(&data).await.is_err() {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    None => break,
                 }
             }
         }
     }
 
-    eprintln!("x11 client disconnected");
+    eprintln!("x11 tcp client disconnected");
 }

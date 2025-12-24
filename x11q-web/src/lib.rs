@@ -12,16 +12,16 @@ mod atom;
 mod input;
 
 use wasm_bindgen::prelude::*;
-use std::sync::Arc;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 pub use server::X11Server;
 pub use renderer::Renderer;
 
-/// Global server instance
+/// Global server instance and input buffer
 thread_local! {
     static SERVER: RefCell<Option<Rc<RefCell<X11Server>>>> = RefCell::new(None);
+    static BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
 /// Initialize the X11 server with a canvas element
@@ -55,16 +55,89 @@ pub async fn init(canvas_id: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Reset the server state for a new connection
+#[wasm_bindgen]
+pub fn reset_connection() {
+    SERVER.with(|s| {
+        if let Some(server) = s.borrow().as_ref() {
+            server.borrow_mut().reset();
+        }
+    });
+    BUFFER.with(|b| {
+        b.borrow_mut().clear();
+    });
+    log::info!("connection reset");
+}
+
 /// Process incoming X11 protocol data
 #[wasm_bindgen]
 pub fn process_x11_data(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+    // Add incoming data to buffer
+    BUFFER.with(|b| {
+        b.borrow_mut().extend_from_slice(data);
+    });
+
     SERVER.with(|s| {
         let server = s.borrow();
         let server = server.as_ref().ok_or("server not initialized")?;
         let mut server = server.borrow_mut();
 
-        server.process_request(data)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let mut all_replies = Vec::new();
+
+        loop {
+            let buffer_len = BUFFER.with(|b| b.borrow().len());
+            if buffer_len == 0 {
+                break;
+            }
+
+            // Check state BEFORE processing
+            let was_awaiting_setup = server.is_awaiting_setup();
+
+            // Try to process one request from buffer
+            let result = BUFFER.with(|b| {
+                let buf = b.borrow();
+                server.process_request(&buf)
+            });
+
+            match result {
+                Ok(reply) => {
+                    // Remove processed bytes from buffer
+                    let consumed = BUFFER.with(|b| {
+                        let buf = b.borrow();
+                        if was_awaiting_setup {
+                            // Connection setup consumes all available data
+                            buf.len()
+                        } else if buf.len() >= 4 {
+                            // Regular request: length is in bytes 2-3 (in 4-byte words)
+                            let len = u16::from_le_bytes([buf[2], buf[3]]) as usize * 4;
+                            if len == 0 { 4 } else { len }
+                        } else {
+                            buf.len()
+                        }
+                    });
+
+                    BUFFER.with(|b| {
+                        let mut buf = b.borrow_mut();
+                        if consumed <= buf.len() {
+                            buf.drain(..consumed);
+                        } else {
+                            buf.clear();
+                        }
+                    });
+
+                    all_replies.extend(reply);
+                }
+                Err(e) => {
+                    if e.contains("incomplete") || e.contains("too short") {
+                        // Need more data, stop processing
+                        break;
+                    }
+                    return Err(JsValue::from_str(&e));
+                }
+            }
+        }
+
+        Ok(all_replies)
     })
 }
 

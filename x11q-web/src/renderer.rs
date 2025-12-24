@@ -215,7 +215,7 @@ impl Renderer {
     }
 
     /// Render root window and all children
-    pub fn render(&mut self, windows: &[(u32, i16, i16, u16, u16)]) -> Result<(), String> {
+    pub fn render(&mut self, _windows: &[(u32, i16, i16, u16, u16)]) -> Result<(), String> {
         let output = self.surface
             .get_current_texture()
             .map_err(|e| e.to_string())?;
@@ -227,16 +227,16 @@ impl Renderer {
         });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.1,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -247,10 +247,8 @@ impl Renderer {
                 timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
-
-            // TODO: render each window texture at its position
-            // For now just clear to dark gray
+            // For MVP, just clear to black
+            // TODO: render window textures at their positions
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -50,6 +50,15 @@ mod opcodes {
     pub const GET_MODIFIER_MAPPING: u8 = 119;
 }
 
+/// Connection state
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConnectionState {
+    /// Waiting for initial connection setup
+    AwaitingSetup,
+    /// Connected and processing requests
+    Connected,
+}
+
 /// X11 Server state
 pub struct X11Server {
     renderer: Renderer,
@@ -70,6 +79,12 @@ pub struct X11Server {
     height: u32,
     /// Sequence number
     sequence: u16,
+    /// Connection state
+    state: ConnectionState,
+    /// Resource ID base for this client
+    resource_id_base: u32,
+    /// Resource ID mask
+    resource_id_mask: u32,
 }
 
 impl X11Server {
@@ -86,29 +101,186 @@ impl X11Server {
             keyboard: Keyboard::new(),
             pointer: Pointer::new(),
             events: VecDeque::new(),
-            next_id: 0x00200000, // client resource IDs start here
+            next_id: 0x00200000,
             focus: root_id,
             width,
             height,
             sequence: 0,
+            state: ConnectionState::AwaitingSetup,
+            resource_id_base: 0x00200000,
+            resource_id_mask: 0x001fffff,
         }
     }
 
-    /// Process X11 request, return reply if any
+    /// Reset server state for a new connection
+    pub fn reset(&mut self) {
+        self.state = ConnectionState::AwaitingSetup;
+        self.sequence = 0;
+        self.events.clear();
+        self.windows = WindowTree::new(self.windows.root_id(), self.width as u16, self.height as u16);
+        self.pixmaps = PixmapStore::new();
+        self.gcs = GCStore::new();
+        self.atoms = AtomStore::new();
+        self.focus = self.windows.root_id();
+        log::info!("server state reset - full");
+    }
+
+    /// Check if we're still awaiting connection setup
+    pub fn is_awaiting_setup(&self) -> bool {
+        self.state == ConnectionState::AwaitingSetup
+    }
+
+    /// Process X11 protocol data, return reply if any
     pub fn process_request(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        match self.state {
+            ConnectionState::AwaitingSetup => self.handle_connection_setup(data),
+            ConnectionState::Connected => self.handle_request(data),
+        }
+    }
+
+    /// Handle initial connection setup
+    fn handle_connection_setup(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        if data.len() < 12 {
+            return Err("connection setup too short".into());
+        }
+
+        let byte_order = data[0];
+        let _protocol_major = u16::from_le_bytes([data[2], data[3]]);
+        let _protocol_minor = u16::from_le_bytes([data[4], data[5]]);
+        let auth_name_len = u16::from_le_bytes([data[6], data[7]]) as usize;
+        let auth_data_len = u16::from_le_bytes([data[8], data[9]]) as usize;
+
+        log::info!("X11 connection setup: byte_order={:#x} auth_name_len={} auth_data_len={}",
+            byte_order, auth_name_len, auth_data_len);
+
+        // Build connection setup reply
+        let reply = self.build_connection_reply();
+
+        self.state = ConnectionState::Connected;
+        log::info!("X11 connection established");
+
+        Ok(reply)
+    }
+
+    /// Build the connection setup reply
+    fn build_connection_reply(&self) -> Vec<u8> {
+        let vendor = b"x11q-web";
+        let vendor_len = vendor.len();
+        let vendor_pad = (4 - (vendor_len % 4)) % 4;
+        let vendor_total = vendor_len + vendor_pad;
+
+        let num_formats = 1u8;
+        let format_size = 8 * num_formats as usize;
+
+        // Screen: 40 bytes base + depths
+        // Each depth: 8 bytes header + 24 bytes per visual
+        let screen_size = 40;
+        let depth_size = 8 + 24; // 1 depth with 1 visual
+
+        // Additional data = 32 bytes fixed + vendor + formats + screens
+        let fixed_size = 32;
+        let additional_data_len = fixed_size + vendor_total + format_size + screen_size + depth_size;
+        let additional_words = additional_data_len / 4;
+
+        let root_id = self.windows.root_id();
+        let root_visual = 0x21u32;
+        let default_colormap = 0x20u32;
+
+        let mut reply = Vec::with_capacity(8 + additional_data_len);
+
+        // Header (8 bytes)
+        reply.push(1); // success
+        reply.push(0); // unused
+        reply.extend_from_slice(&11u16.to_le_bytes()); // protocol major
+        reply.extend_from_slice(&0u16.to_le_bytes());  // protocol minor
+        reply.extend_from_slice(&(additional_words as u16).to_le_bytes());
+
+        // Fixed fields (32 bytes)
+        reply.extend_from_slice(&0u32.to_le_bytes()); // release number
+        reply.extend_from_slice(&self.resource_id_base.to_le_bytes());
+        reply.extend_from_slice(&self.resource_id_mask.to_le_bytes());
+        reply.extend_from_slice(&0u32.to_le_bytes()); // motion buffer size
+        reply.extend_from_slice(&(vendor_len as u16).to_le_bytes());
+        reply.extend_from_slice(&0xffffu16.to_le_bytes()); // max request length
+        reply.push(1); // number of screens
+        reply.push(num_formats); // number of formats
+        reply.push(0); // image byte order (LSB first)
+        reply.push(0); // bitmap bit order (LSB first)
+        reply.push(8); // bitmap scanline unit
+        reply.push(32); // bitmap scanline pad
+        reply.push(8); // min keycode
+        reply.push(255); // max keycode
+        reply.extend_from_slice(&[0u8; 4]); // unused padding
+
+        // Vendor string (padded to 4 bytes)
+        reply.extend_from_slice(vendor);
+        for _ in 0..vendor_pad {
+            reply.push(0);
+        }
+
+        // Pixmap formats (8 bytes each)
+        reply.push(24); // depth
+        reply.push(32); // bits per pixel
+        reply.push(32); // scanline pad
+        reply.extend_from_slice(&[0u8; 5]); // padding
+
+        // Screen info (40 bytes)
+        reply.extend_from_slice(&root_id.to_le_bytes()); // root window
+        reply.extend_from_slice(&default_colormap.to_le_bytes()); // default colormap
+        reply.extend_from_slice(&0xffffffffu32.to_le_bytes()); // white pixel
+        reply.extend_from_slice(&0x00000000u32.to_le_bytes()); // black pixel
+        reply.extend_from_slice(&0u32.to_le_bytes()); // current input masks
+        reply.extend_from_slice(&(self.width as u16).to_le_bytes()); // width in pixels
+        reply.extend_from_slice(&(self.height as u16).to_le_bytes()); // height in pixels
+        reply.extend_from_slice(&((self.width / 4) as u16).to_le_bytes()); // width in mm
+        reply.extend_from_slice(&((self.height / 4) as u16).to_le_bytes()); // height in mm
+        reply.extend_from_slice(&1u16.to_le_bytes()); // min installed maps
+        reply.extend_from_slice(&1u16.to_le_bytes()); // max installed maps
+        reply.extend_from_slice(&root_visual.to_le_bytes()); // root visual
+        reply.push(0); // backing stores (Never)
+        reply.push(1); // save unders (Yes)
+        reply.push(24); // root depth
+        reply.push(1); // number of allowed depths
+
+        // Depth info (8 bytes header)
+        reply.push(24); // depth
+        reply.push(0); // unused
+        reply.extend_from_slice(&1u16.to_le_bytes()); // number of visuals
+        reply.extend_from_slice(&[0u8; 4]); // padding
+
+        // Visual info (24 bytes)
+        reply.extend_from_slice(&root_visual.to_le_bytes()); // visual ID
+        reply.push(4); // class (TrueColor)
+        reply.push(8); // bits per RGB value
+        reply.extend_from_slice(&256u16.to_le_bytes()); // colormap entries
+        reply.extend_from_slice(&0x00ff0000u32.to_le_bytes()); // red mask
+        reply.extend_from_slice(&0x0000ff00u32.to_le_bytes()); // green mask
+        reply.extend_from_slice(&0x000000ffu32.to_le_bytes()); // blue mask
+        reply.extend_from_slice(&[0u8; 4]); // padding
+
+        log::info!("connection reply: {} bytes (header says 8+{}*4={} bytes)",
+            reply.len(), additional_words, 8 + additional_words * 4);
+
+        reply
+    }
+
+    /// Handle a regular X11 request
+    fn handle_request(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
         if data.len() < 4 {
             return Err("request too short".into());
         }
 
         let opcode = data[0];
-        let _detail = data[1];
+        let detail = data[1];
         let length = u16::from_le_bytes([data[2], data[3]]) as usize * 4;
 
-        if data.len() < length {
-            return Err("incomplete request".into());
+        if length > 0 && data.len() < length {
+            return Err(format!("incomplete request: have {} need {}", data.len(), length));
         }
 
         self.sequence = self.sequence.wrapping_add(1);
+
+        log::info!("X11 request: opcode={} detail={} len={} seq={}", opcode, detail, length, self.sequence);
 
         match opcode {
             opcodes::CREATE_WINDOW => self.handle_create_window(data),

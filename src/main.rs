@@ -20,6 +20,7 @@
 
 mod mirror;
 mod rendezvous;
+mod test_server;
 mod web;
 
 use anyhow::{Context, Result};
@@ -133,6 +134,15 @@ enum Commands {
         #[arg(long)]
         www: Option<String>,
     },
+
+    /// Test X11 server (native protocol handler, no browser needed)
+    /// For testing X11 clients without wasm/webgpu
+    #[command(name = "test-server")]
+    TestServer {
+        /// Virtual display number to create
+        #[arg(short, long, default_value = "99")]
+        display: u32,
+    },
 }
 
 #[tokio::main]
@@ -168,6 +178,9 @@ async fn main() -> Result<()> {
         }
         Commands::Web { display, port, www } => {
             web::run_web(display, port, www.as_deref()).await
+        }
+        Commands::TestServer { display } => {
+            test_server::run_test_server(display).await
         }
     }
 }

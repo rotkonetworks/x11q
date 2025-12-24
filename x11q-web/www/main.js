@@ -1,5 +1,6 @@
 import init, {
     init as initServer,
+    reset_connection,
     process_x11_data,
     handle_keydown,
     handle_keyup,
@@ -15,6 +16,7 @@ class X11Client {
         this.canvas = document.getElementById('canvas');
         this.status = document.getElementById('status');
         this.connected = false;
+        this.x11Connected = false; // True after X11 connection setup complete
     }
 
     async start() {
@@ -37,24 +39,39 @@ class X11Client {
 
         this.ws.onopen = () => {
             this.connected = true;
-            this.setStatus('connected', 'connected');
-            this.startEventLoop();
+            this.x11Connected = false;
+            // Reset server state for new connections
+            reset_connection();
+            this.setStatus('waiting for x11 client', 'connecting');
         };
 
         this.ws.onmessage = (event) => {
             const data = new Uint8Array(event.data);
+            console.log('x11 request:', data.length, 'bytes, first byte:', data[0]);
             try {
                 const response = process_x11_data(data);
                 if (response && response.length > 0) {
+                    console.log('x11 response:', response.length, 'bytes');
                     this.ws.send(response);
+
+                    // After first successful response, we're fully connected
+                    if (!this.x11Connected) {
+                        this.x11Connected = true;
+                        this.setStatus('connected', 'connected');
+                        this.startEventLoop();
+                    }
+                } else {
+                    console.log('no response needed');
                 }
             } catch (e) {
                 console.error('process error:', e);
+                // Don't let errors crash the connection
             }
         };
 
         this.ws.onclose = () => {
             this.connected = false;
+            this.x11Connected = false;
             this.setStatus('disconnected', 'disconnected');
             // Reconnect after delay
             setTimeout(() => this.connect(url), 2000);
@@ -67,7 +84,9 @@ class X11Client {
 
     startEventLoop() {
         const sendEvents = () => {
-            if (!this.connected || this.ws.readyState !== WebSocket.OPEN) return;
+            if (!this.connected || !this.x11Connected || this.ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
 
             try {
                 const events = get_pending_events();
@@ -109,16 +128,19 @@ class X11Client {
         this.canvas.focus();
 
         this.canvas.addEventListener('keydown', (e) => {
+            if (!this.x11Connected) return;
             e.preventDefault();
             handle_keydown(e.code, e.key, modifiers(e));
         });
 
         this.canvas.addEventListener('keyup', (e) => {
+            if (!this.x11Connected) return;
             e.preventDefault();
             handle_keyup(e.code, e.key, modifiers(e));
         });
 
         this.canvas.addEventListener('mousemove', (e) => {
+            if (!this.x11Connected) return;
             const rect = this.canvas.getBoundingClientRect();
             const x = Math.floor(e.clientX - rect.left);
             const y = Math.floor(e.clientY - rect.top);
@@ -126,6 +148,7 @@ class X11Client {
         });
 
         this.canvas.addEventListener('mousedown', (e) => {
+            if (!this.x11Connected) return;
             e.preventDefault();
             this.canvas.focus();
             const rect = this.canvas.getBoundingClientRect();
@@ -135,6 +158,7 @@ class X11Client {
         });
 
         this.canvas.addEventListener('mouseup', (e) => {
+            if (!this.x11Connected) return;
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
             const x = Math.floor(e.clientX - rect.left);
@@ -145,6 +169,7 @@ class X11Client {
         this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
         this.canvas.addEventListener('wheel', (e) => {
+            if (!this.x11Connected) return;
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
             const x = Math.floor(e.clientX - rect.left);
