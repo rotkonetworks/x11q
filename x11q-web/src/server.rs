@@ -6,7 +6,7 @@ use crate::gc::{GCStore, GC};
 use crate::input::{Keyboard, Pointer};
 use crate::renderer::Renderer;
 use crate::window::{Window, WindowClass, WindowTree};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// X11 protocol opcodes (subset for bspwm + alacritty)
 mod opcodes {
@@ -24,6 +24,7 @@ mod opcodes {
     pub const CHANGE_PROPERTY: u8 = 18;
     pub const DELETE_PROPERTY: u8 = 19;
     pub const GET_PROPERTY: u8 = 20;
+    pub const GET_SELECTION_OWNER: u8 = 23;
     pub const GRAB_POINTER: u8 = 26;
     pub const UNGRAB_POINTER: u8 = 27;
     pub const GRAB_KEYBOARD: u8 = 31;
@@ -33,6 +34,8 @@ mod opcodes {
     pub const GET_INPUT_FOCUS: u8 = 43;
     pub const OPEN_FONT: u8 = 45;
     pub const CLOSE_FONT: u8 = 46;
+    pub const QUERY_FONT: u8 = 47;
+    pub const LIST_FONTS_WITH_INFO: u8 = 49;
     pub const CREATE_PIXMAP: u8 = 53;
     pub const FREE_PIXMAP: u8 = 54;
     pub const CREATE_GC: u8 = 55;
@@ -45,9 +48,18 @@ mod opcodes {
     pub const GET_IMAGE: u8 = 73;
     pub const CREATE_COLORMAP: u8 = 78;
     pub const ALLOC_COLOR: u8 = 84;
+    pub const QUERY_COLORS: u8 = 91;
+    pub const QUERY_BEST_SIZE: u8 = 97;
     pub const QUERY_EXTENSION: u8 = 98;
+    pub const QUERY_KEYMAP: u8 = 99;
     pub const GET_KEYBOARD_MAPPING: u8 = 101;
     pub const GET_MODIFIER_MAPPING: u8 = 119;
+
+    // Extension major opcodes
+    pub const GE_MAJOR: u8 = 128;
+    pub const XINPUT_MAJOR: u8 = 131;
+    pub const XKB_MAJOR: u8 = 135;
+    pub const RANDR_MAJOR: u8 = 140;
 }
 
 /// Connection state
@@ -85,12 +97,24 @@ pub struct X11Server {
     resource_id_base: u32,
     /// Resource ID mask
     resource_id_mask: u32,
+    /// Extensions: name -> (major_opcode, first_event, first_error)
+    extensions: HashMap<String, (u8, u8, u8)>,
 }
 
 impl X11Server {
     pub fn new(renderer: Renderer, width: u32, height: u32) -> Self {
         let root_id = 0x00000001;
         let windows = WindowTree::new(root_id, width as u16, height as u16);
+
+        let mut extensions = HashMap::new();
+        // RANDR: major_opcode=140, first_event=89, first_error=147
+        extensions.insert("RANDR".to_string(), (opcodes::RANDR_MAJOR, 89, 147));
+        // XInputExtension: major_opcode=131, first_event=147, first_error=135
+        extensions.insert("XInputExtension".to_string(), (opcodes::XINPUT_MAJOR, 147, 135));
+        // XKEYBOARD: major_opcode=135, first_event=85, first_error=137
+        extensions.insert("XKEYBOARD".to_string(), (opcodes::XKB_MAJOR, 85, 137));
+        // Generic Event Extension: major_opcode=128, first_event=0, first_error=0
+        extensions.insert("Generic Event Extension".to_string(), (opcodes::GE_MAJOR, 0, 0));
 
         Self {
             renderer,
@@ -109,6 +133,7 @@ impl X11Server {
             state: ConnectionState::AwaitingSetup,
             resource_id_base: 0x00200000,
             resource_id_mask: 0x001fffff,
+            extensions,
         }
     }
 
@@ -296,20 +321,37 @@ impl X11Server {
             opcodes::GET_ATOM_NAME => self.handle_get_atom_name(data),
             opcodes::CHANGE_PROPERTY => self.handle_change_property(data),
             opcodes::GET_PROPERTY => self.handle_get_property(data),
+            opcodes::GET_SELECTION_OWNER => self.handle_get_selection_owner(data),
             opcodes::QUERY_POINTER => self.handle_query_pointer(data),
             opcodes::SET_INPUT_FOCUS => self.handle_set_input_focus(data),
             opcodes::GET_INPUT_FOCUS => self.handle_get_input_focus(data),
+            opcodes::OPEN_FONT => Ok(Vec::new()),
+            opcodes::CLOSE_FONT => Ok(Vec::new()),
+            opcodes::QUERY_FONT => self.handle_query_font(data),
+            opcodes::LIST_FONTS_WITH_INFO => self.handle_list_fonts_with_info(data),
             opcodes::CREATE_PIXMAP => self.handle_create_pixmap(data),
             opcodes::FREE_PIXMAP => self.handle_free_pixmap(data),
             opcodes::CREATE_GC => self.handle_create_gc(data),
             opcodes::CHANGE_GC => self.handle_change_gc(data),
             opcodes::FREE_GC => self.handle_free_gc(data),
             opcodes::CLEAR_AREA => self.handle_clear_area(data),
+            opcodes::COPY_AREA => Ok(Vec::new()),
             opcodes::POLY_FILL_RECTANGLE => self.handle_poly_fill_rectangle(data),
             opcodes::PUT_IMAGE => self.handle_put_image(data),
+            opcodes::GET_IMAGE => self.handle_get_image(data),
+            opcodes::CREATE_COLORMAP => Ok(Vec::new()),
+            opcodes::ALLOC_COLOR => self.handle_alloc_color(data),
+            opcodes::QUERY_COLORS => self.handle_query_colors(data),
+            opcodes::QUERY_BEST_SIZE => self.handle_query_best_size(data),
             opcodes::QUERY_EXTENSION => self.handle_query_extension(data),
+            opcodes::QUERY_KEYMAP => self.handle_query_keymap(data),
             opcodes::GET_KEYBOARD_MAPPING => self.handle_get_keyboard_mapping(data),
             opcodes::GET_MODIFIER_MAPPING => self.handle_get_modifier_mapping(data),
+            // Extensions
+            opcodes::GE_MAJOR => self.handle_ge(data),
+            opcodes::XINPUT_MAJOR => self.handle_xinput(data),
+            opcodes::XKB_MAJOR => self.handle_xkb(data),
+            opcodes::RANDR_MAJOR => self.handle_randr(data),
             _ => {
                 log::warn!("unhandled opcode: {}", opcode);
                 Ok(Vec::new())
@@ -734,13 +776,22 @@ impl X11Server {
         let name_len = u16::from_le_bytes([data[4], data[5]]) as usize;
         let name = std::str::from_utf8(&data[8..8 + name_len]).unwrap_or("");
 
-        log::debug!("QueryExtension: {}", name);
+        log::info!("QueryExtension: {}", name);
 
-        // Return "not present" for all extensions for now
         let mut reply = vec![0u8; 32];
         reply[0] = 1;
         reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
-        reply[8] = 0; // present = false
+
+        if let Some(&(major, first_event, first_error)) = self.extensions.get(name) {
+            reply[8] = 1; // present = true
+            reply[9] = major; // major-opcode
+            reply[10] = first_event; // first-event
+            reply[11] = first_error; // first-error
+            log::info!("  -> present: major={} event={} error={}", major, first_event, first_error);
+        } else {
+            reply[8] = 0; // present = false
+            log::info!("  -> not present");
+        }
 
         Ok(reply)
     }
@@ -796,6 +847,425 @@ impl X11Server {
         reply[44] = 133; // Super_L
         reply[45] = 134; // Super_R
 
+        Ok(reply)
+    }
+
+    fn handle_get_selection_owner(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..12].copy_from_slice(&0u32.to_le_bytes()); // owner = None
+        Ok(reply)
+    }
+
+    fn handle_query_font(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 60];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&7u32.to_le_bytes()); // length
+        Ok(reply)
+    }
+
+    fn handle_list_fonts_with_info(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        // Return "no more fonts" reply (name length 0 terminates)
+        let mut reply = vec![0u8; 60];
+        reply[0] = 1;
+        reply[1] = 0; // name-length = 0 means no more fonts
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&7u32.to_le_bytes()); // length
+        Ok(reply)
+    }
+
+    fn handle_get_image(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 24; // depth
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..12].copy_from_slice(&0x21u32.to_le_bytes()); // visual
+        Ok(reply)
+    }
+
+    fn handle_alloc_color(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..10].copy_from_slice(&0xffffu16.to_le_bytes()); // red
+        reply[10..12].copy_from_slice(&0xffffu16.to_le_bytes()); // green
+        reply[12..14].copy_from_slice(&0xffffu16.to_le_bytes()); // blue
+        reply[16..20].copy_from_slice(&0xffffffu32.to_le_bytes()); // pixel
+        Ok(reply)
+    }
+
+    fn handle_query_colors(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let num_pixels = if data.len() >= 8 { (data.len() - 8) / 4 } else { 0 };
+        let mut reply = vec![0u8; 32 + num_pixels * 8];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&((num_pixels * 2) as u32).to_le_bytes());
+        reply[8..10].copy_from_slice(&(num_pixels as u16).to_le_bytes());
+        for i in 0..num_pixels {
+            let offset = 32 + i * 8;
+            reply[offset..offset+2].copy_from_slice(&0xffffu16.to_le_bytes());
+            reply[offset+2..offset+4].copy_from_slice(&0xffffu16.to_le_bytes());
+            reply[offset+4..offset+6].copy_from_slice(&0xffffu16.to_le_bytes());
+        }
+        Ok(reply)
+    }
+
+    fn handle_query_best_size(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..10].copy_from_slice(&16u16.to_le_bytes()); // width
+        reply[10..12].copy_from_slice(&16u16.to_le_bytes()); // height
+        Ok(reply)
+    }
+
+    fn handle_query_keymap(&mut self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        Ok(reply)
+    }
+
+    // Extension handlers
+
+    fn handle_ge(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let minor = data[1];
+        log::info!("GE request: minor={}", minor);
+
+        match minor {
+            0 => {
+                // GEQueryVersion - return version 1.0
+                let mut reply = vec![0u8; 32];
+                reply[0] = 1;
+                reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+                reply[8..10].copy_from_slice(&1u16.to_le_bytes()); // major
+                reply[10..12].copy_from_slice(&0u16.to_le_bytes()); // minor
+                Ok(reply)
+            }
+            _ => {
+                log::warn!("unhandled GE minor: {}", minor);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn handle_xinput(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let minor = data[1];
+        log::info!("XInput request: minor={}", minor);
+
+        match minor {
+            1 => self.xinput_query_version(),
+            46 => self.xinput_query_device(),
+            47 => self.xinput_query_pointer(),
+            48 => self.xinput_get_focus(),
+            52 => Ok(Vec::new()), // XISelectEvents - no reply
+            61 => self.xinput_get_selected_events(),
+            _ => {
+                log::warn!("unhandled XInput minor: {}", minor);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn xinput_query_version(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..10].copy_from_slice(&2u16.to_le_bytes()); // major
+        reply[10..12].copy_from_slice(&3u16.to_le_bytes()); // minor
+        Ok(reply)
+    }
+
+    fn xinput_query_device(&self) -> Result<Vec<u8>, String> {
+        let num_devices = 2u16;
+        let mut devices = Vec::new();
+
+        // Master pointer (device ID 2)
+        devices.extend_from_slice(&2u16.to_le_bytes());
+        devices.extend_from_slice(&1u16.to_le_bytes()); // type = MasterPointer
+        devices.extend_from_slice(&3u16.to_le_bytes()); // attachment
+        devices.extend_from_slice(&0u16.to_le_bytes()); // num_classes
+        devices.extend_from_slice(&14u16.to_le_bytes()); // name_len
+        devices.push(1); // enabled
+        devices.push(0);
+        devices.extend_from_slice(b"Master pointer");
+        devices.extend_from_slice(&[0u8; 2]); // pad to 4
+
+        // Master keyboard (device ID 3)
+        devices.extend_from_slice(&3u16.to_le_bytes());
+        devices.extend_from_slice(&2u16.to_le_bytes()); // type = MasterKeyboard
+        devices.extend_from_slice(&2u16.to_le_bytes()); // attachment
+        devices.extend_from_slice(&0u16.to_le_bytes()); // num_classes
+        devices.extend_from_slice(&15u16.to_le_bytes()); // name_len
+        devices.push(1); // enabled
+        devices.push(0);
+        devices.extend_from_slice(b"Master keyboard");
+        devices.push(0); // pad to 4
+
+        let length = devices.len() / 4;
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+        reply[8..10].copy_from_slice(&num_devices.to_le_bytes());
+        reply.extend_from_slice(&devices);
+        Ok(reply)
+    }
+
+    fn xinput_query_pointer(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 56];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&4u32.to_le_bytes()); // length
+        reply[8..12].copy_from_slice(&self.windows.root_id().to_le_bytes());
+        // root_x, root_y, win_x, win_y as Fixed (16.16)
+        let pos = (self.pointer.x as i32) << 16;
+        reply[16..20].copy_from_slice(&pos.to_le_bytes());
+        reply[20..24].copy_from_slice(&pos.to_le_bytes());
+        reply[24..28].copy_from_slice(&pos.to_le_bytes());
+        reply[28..32].copy_from_slice(&pos.to_le_bytes());
+        reply[32] = 1; // same_screen
+        Ok(reply)
+    }
+
+    fn xinput_get_focus(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..12].copy_from_slice(&self.windows.root_id().to_le_bytes());
+        Ok(reply)
+    }
+
+    fn xinput_get_selected_events(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..10].copy_from_slice(&0u16.to_le_bytes()); // num_masks = 0
+        Ok(reply)
+    }
+
+    fn handle_xkb(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let minor = data[1];
+        log::info!("XKB request: minor={}", minor);
+
+        match minor {
+            0 => self.xkb_use_extension(),
+            1 => Ok(Vec::new()), // XkbSelectEvents - no reply
+            6 => self.xkb_get_controls(),
+            8 => self.xkb_get_map(),
+            9 => Ok(Vec::new()), // XkbSetMap - no reply
+            10 => self.xkb_get_compat_map(),
+            13 => self.xkb_get_indicator_map(),
+            17 | 24 => self.xkb_get_names(),
+            _ => {
+                log::warn!("unhandled XKB minor: {}", minor);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn xkb_use_extension(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 1; // supported
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..10].copy_from_slice(&1u16.to_le_bytes()); // major
+        reply[10..12].copy_from_slice(&0u16.to_le_bytes()); // minor
+        Ok(reply)
+    }
+
+    fn xkb_get_map(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 40];
+        reply[0] = 1;
+        reply[1] = 3; // deviceID
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&2u32.to_le_bytes()); // length
+        reply[10] = 8; // min keycode
+        reply[11] = 255; // max keycode
+        Ok(reply)
+    }
+
+    fn xkb_get_names(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 3; // deviceID
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[12] = 8; // min keycode
+        reply[13] = 255; // max keycode
+        Ok(reply)
+    }
+
+    fn xkb_get_controls(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 92];
+        reply[0] = 1;
+        reply[1] = 3; // deviceID
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&15u32.to_le_bytes()); // length
+        reply[9] = 1; // numGroups
+        reply[22..24].copy_from_slice(&500u16.to_le_bytes()); // repeatDelay
+        reply[24..26].copy_from_slice(&30u16.to_le_bytes()); // repeatInterval
+        // perKeyRepeat (32 bytes) at offset 60
+        for i in 60..92 {
+            reply[i] = 0xff;
+        }
+        Ok(reply)
+    }
+
+    fn xkb_get_compat_map(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 3; // deviceID
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        Ok(reply)
+    }
+
+    fn xkb_get_indicator_map(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 3; // deviceID
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        Ok(reply)
+    }
+
+    fn handle_randr(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let minor = data[1];
+        log::info!("RANDR request: minor={}", minor);
+
+        match minor {
+            0 => self.randr_query_version(),
+            4 => Ok(Vec::new()), // RRSelectInput - no reply
+            5 => self.randr_get_screen_resources(),
+            6 => self.randr_get_output_info(),
+            9 => self.randr_get_crtc_info(),
+            25 => self.randr_get_output_primary(),
+            31 => self.randr_get_providers(),
+            _ => {
+                log::warn!("unhandled RANDR minor: {}", minor);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn randr_query_version(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..12].copy_from_slice(&1u32.to_le_bytes()); // major
+        reply[12..16].copy_from_slice(&6u32.to_le_bytes()); // minor
+        Ok(reply)
+    }
+
+    fn randr_get_screen_resources(&self) -> Result<Vec<u8>, String> {
+        let num_crtcs = 1u16;
+        let num_outputs = 1u16;
+        let num_modes = 1u16;
+        let names_len = 8u16;
+
+        let length = (8 + num_crtcs as u32 * 4 + num_outputs as u32 * 4 + num_modes as u32 * 32 + names_len as u32) / 4;
+
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&length.to_le_bytes());
+        reply[16..18].copy_from_slice(&num_crtcs.to_le_bytes());
+        reply[18..20].copy_from_slice(&num_outputs.to_le_bytes());
+        reply[20..22].copy_from_slice(&num_modes.to_le_bytes());
+        reply[22..24].copy_from_slice(&names_len.to_le_bytes());
+
+        // CRTCs
+        reply.extend_from_slice(&1u32.to_le_bytes());
+        // Outputs
+        reply.extend_from_slice(&1u32.to_le_bytes());
+        // Mode (32 bytes)
+        reply.extend_from_slice(&1u32.to_le_bytes()); // id
+        reply.extend_from_slice(&(self.width as u16).to_le_bytes());
+        reply.extend_from_slice(&(self.height as u16).to_le_bytes());
+        reply.extend_from_slice(&60000000u32.to_le_bytes()); // dotClock
+        reply.extend_from_slice(&(self.width as u16).to_le_bytes());
+        reply.extend_from_slice(&(self.width as u16).to_le_bytes());
+        reply.extend_from_slice(&(self.width as u16).to_le_bytes());
+        reply.extend_from_slice(&0u16.to_le_bytes()); // hSkew
+        reply.extend_from_slice(&(self.height as u16).to_le_bytes());
+        reply.extend_from_slice(&(self.height as u16).to_le_bytes());
+        reply.extend_from_slice(&(self.height as u16).to_le_bytes());
+        reply.extend_from_slice(&7u16.to_le_bytes()); // name_len
+        reply.extend_from_slice(&0u32.to_le_bytes()); // flags
+        // Names
+        reply.extend_from_slice(b"default\0");
+
+        Ok(reply)
+    }
+
+    fn randr_get_output_info(&self) -> Result<Vec<u8>, String> {
+        let num_crtcs = 1u16;
+        let num_modes = 1u16;
+        let name_len = 7u16;
+
+        let length = (12 + num_crtcs as u32 * 4 + num_modes as u32 * 4 + ((name_len as u32 + 3) & !3)) / 4;
+
+        let mut reply = vec![0u8; 36];
+        reply[0] = 1;
+        reply[1] = 0; // status
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&length.to_le_bytes());
+        reply[12..16].copy_from_slice(&1u32.to_le_bytes()); // crtc
+        reply[16..20].copy_from_slice(&((self.width / 4) as u32).to_le_bytes());
+        reply[20..24].copy_from_slice(&((self.height / 4) as u32).to_le_bytes());
+        reply[24] = 1; // connection = Connected
+        reply[26..28].copy_from_slice(&num_crtcs.to_le_bytes());
+        reply[28..30].copy_from_slice(&num_modes.to_le_bytes());
+        reply[30..32].copy_from_slice(&1u16.to_le_bytes()); // preferred
+        reply[34..36].copy_from_slice(&name_len.to_le_bytes());
+
+        reply.extend_from_slice(&1u32.to_le_bytes()); // CRTC
+        reply.extend_from_slice(&1u32.to_le_bytes()); // Mode
+        reply.extend_from_slice(b"default\0");
+
+        Ok(reply)
+    }
+
+    fn randr_get_crtc_info(&self) -> Result<Vec<u8>, String> {
+        let num_outputs = 1u16;
+        let num_possible = 1u16;
+
+        let length = (8 + num_outputs as u32 * 4 + num_possible as u32 * 4) / 4;
+
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[1] = 0; // status
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[4..8].copy_from_slice(&length.to_le_bytes());
+        reply[12..14].copy_from_slice(&0i16.to_le_bytes()); // x
+        reply[14..16].copy_from_slice(&0i16.to_le_bytes()); // y
+        reply[16..18].copy_from_slice(&(self.width as u16).to_le_bytes());
+        reply[18..20].copy_from_slice(&(self.height as u16).to_le_bytes());
+        reply[20..24].copy_from_slice(&1u32.to_le_bytes()); // mode
+        reply[24..26].copy_from_slice(&1u16.to_le_bytes()); // rotation
+        reply[26..28].copy_from_slice(&1u16.to_le_bytes()); // rotations
+        reply[28..30].copy_from_slice(&num_outputs.to_le_bytes());
+        reply[30..32].copy_from_slice(&num_possible.to_le_bytes());
+
+        reply.extend_from_slice(&1u32.to_le_bytes()); // output
+        reply.extend_from_slice(&1u32.to_le_bytes()); // possible
+
+        Ok(reply)
+    }
+
+    fn randr_get_output_primary(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[8..12].copy_from_slice(&1u32.to_le_bytes()); // output
+        Ok(reply)
+    }
+
+    fn randr_get_providers(&self) -> Result<Vec<u8>, String> {
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1;
+        reply[2..4].copy_from_slice(&self.sequence.to_le_bytes());
+        reply[12..14].copy_from_slice(&0u16.to_le_bytes()); // num_providers
         Ok(reply)
     }
 

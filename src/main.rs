@@ -18,6 +18,7 @@
 //! remote: x11q client <nodeid> → DISPLAY=:99 ready
 //! ```
 
+mod display;
 mod mirror;
 mod rendezvous;
 mod test_server;
@@ -143,6 +144,22 @@ enum Commands {
         #[arg(short, long, default_value = "99")]
         display: u32,
     },
+
+    /// Native X11 display server with rendering
+    /// Runs on Windows/Linux/macOS, connects from WSL or remote Linux
+    Display {
+        /// Virtual display number to create
+        #[arg(short, long, default_value = "99")]
+        display: u32,
+
+        /// Screen width
+        #[arg(long, default_value = "1280")]
+        width: u32,
+
+        /// Screen height
+        #[arg(long, default_value = "720")]
+        height: u32,
+    },
 }
 
 #[tokio::main]
@@ -181,6 +198,9 @@ async fn main() -> Result<()> {
         }
         Commands::TestServer { display } => {
             test_server::run_test_server(display).await
+        }
+        Commands::Display { display, width, height } => {
+            display::run_display(display, width, height).await
         }
     }
 }

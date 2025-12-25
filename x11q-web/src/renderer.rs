@@ -11,6 +11,8 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     /// Texture atlas for pixmaps/windows
     textures: HashMap<u32, RendererTexture>,
 }
@@ -18,6 +20,7 @@ pub struct Renderer {
 struct RendererTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
 }
@@ -72,6 +75,40 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
+        // Create bind group layout for texture + sampler
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Create sampler
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("x11 shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -79,7 +116,7 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("x11 pipeline layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -127,6 +164,8 @@ impl Renderer {
             surface,
             surface_config,
             pipeline,
+            bind_group_layout,
+            sampler,
             textures: HashMap::new(),
         })
     }
@@ -136,8 +175,8 @@ impl Renderer {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("drawable_{}", id)),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: width.max(1),
+                height: height.max(1),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -152,11 +191,27 @@ impl Renderer {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("bind_group_{}", id)),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
         self.textures.insert(id, RendererTexture {
             texture,
             view,
-            width,
-            height,
+            bind_group,
+            width: width.max(1),
+            height: height.max(1),
         });
     }
 
@@ -215,7 +270,7 @@ impl Renderer {
     }
 
     /// Render root window and all children
-    pub fn render(&mut self, _windows: &[(u32, i16, i16, u16, u16)]) -> Result<(), String> {
+    pub fn render(&mut self, windows: &[(u32, i16, i16, u16, u16)]) -> Result<(), String> {
         let output = self.surface
             .get_current_texture()
             .map_err(|e| e.to_string())?;
@@ -226,17 +281,20 @@ impl Renderer {
             label: Some("render encoder"),
         });
 
+        let screen_width = self.surface_config.width as f32;
+        let screen_height = self.surface_config.height as f32;
+
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -247,8 +305,37 @@ impl Renderer {
                 timestamp_writes: None,
             });
 
-            // For MVP, just clear to black
-            // TODO: render window textures at their positions
+            render_pass.set_pipeline(&self.pipeline);
+
+            // Render each mapped window
+            for &(wid, x, y, w, h) in windows {
+                if let Some(tex) = self.textures.get(&wid) {
+                    // Convert pixel coords to clip space (-1 to 1)
+                    let x0 = (x as f32 / screen_width) * 2.0 - 1.0;
+                    let y0 = 1.0 - (y as f32 / screen_height) * 2.0;
+                    let x1 = ((x as f32 + w as f32) / screen_width) * 2.0 - 1.0;
+                    let y1 = 1.0 - ((y as f32 + h as f32) / screen_height) * 2.0;
+
+                    let vertices = [
+                        Vertex { position: [x0, y0], tex_coords: [0.0, 0.0] },
+                        Vertex { position: [x1, y0], tex_coords: [1.0, 0.0] },
+                        Vertex { position: [x0, y1], tex_coords: [0.0, 1.0] },
+                        Vertex { position: [x1, y0], tex_coords: [1.0, 0.0] },
+                        Vertex { position: [x1, y1], tex_coords: [1.0, 1.0] },
+                        Vertex { position: [x0, y1], tex_coords: [0.0, 1.0] },
+                    ];
+
+                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vertex buffer"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                    render_pass.set_bind_group(0, &tex.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    render_pass.draw(0..6, 0..1);
+                }
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
