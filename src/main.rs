@@ -21,7 +21,9 @@
 mod display;
 mod mirror;
 mod rendezvous;
+#[cfg(unix)]
 mod test_server;
+#[cfg(unix)]
 mod web;
 
 use anyhow::{Context, Result};
@@ -30,8 +32,11 @@ use iroh::{Endpoint, NodeId};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io;
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
+#[cfg(unix)]
 const X11_UNIX_DIR: &str = "/tmp/.X11-unix";
 const X11_TCP_BASE: u16 = 6000;
 const ALPN: &[u8] = b"x11quic/1";
@@ -122,6 +127,7 @@ enum Commands {
 
     /// Run X11 server in browser via WebSocket
     /// Starts web server, X11 clients connect locally, rendered in browser
+    #[cfg(unix)]
     Web {
         /// Virtual display number to create
         #[arg(short, long, default_value = "99")]
@@ -138,6 +144,7 @@ enum Commands {
 
     /// Test X11 server (native protocol handler, no browser needed)
     /// For testing X11 clients without wasm/webgpu
+    #[cfg(unix)]
     #[command(name = "test-server")]
     TestServer {
         /// Virtual display number to create
@@ -178,11 +185,16 @@ async fn main() -> Result<()> {
         Commands::Serve { display } => run_serve(&display).await,
         Commands::Join { code, display } => run_join(&code, display).await,
         Commands::Server { display, bind } => run_server(&display, bind.as_deref()).await,
-        Commands::Client { node_id, display, addr } => {
-            run_client(&node_id, display, addr.as_deref()).await
-        }
+        Commands::Client {
+            node_id,
+            display,
+            addr,
+        } => run_client(&node_id, display, addr.as_deref()).await,
         Commands::Id => {
-            let endpoint = Endpoint::builder().alpns(vec![ALPN.to_vec()]).bind().await?;
+            let endpoint = Endpoint::builder()
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await?;
             println!("{}", endpoint.node_id());
             endpoint.close().await;
             Ok(())
@@ -193,15 +205,15 @@ async fn main() -> Result<()> {
         Commands::Mirror { node_id, addr } => {
             mirror::run_mirror_client(&node_id, addr.as_deref()).await
         }
-        Commands::Web { display, port, www } => {
-            web::run_web(display, port, www.as_deref()).await
-        }
-        Commands::TestServer { display } => {
-            test_server::run_test_server(display).await
-        }
-        Commands::Display { display, width, height } => {
-            display::run_display(display, width, height).await
-        }
+        #[cfg(unix)]
+        Commands::Web { display, port, www } => web::run_web(display, port, www.as_deref()).await,
+        #[cfg(unix)]
+        Commands::TestServer { display } => test_server::run_test_server(display).await,
+        Commands::Display {
+            display,
+            width,
+            height,
+        } => display::run_display(display, width, height).await,
     }
 }
 
@@ -212,11 +224,18 @@ fn parse_display(display: &str) -> Result<u32> {
         .context("invalid display number")
 }
 
+#[cfg(unix)]
 fn x11_paths(display_num: u32) -> (String, String, bool) {
     let socket = format!("{}/X{}", X11_UNIX_DIR, display_num);
     let tcp = format!("127.0.0.1:{}", X11_TCP_BASE + display_num as u16);
     let use_unix = std::path::Path::new(&socket).exists();
     (socket, tcp, use_unix)
+}
+
+#[cfg(not(unix))]
+fn x11_paths(display_num: u32) -> (String, String, bool) {
+    let tcp = format!("127.0.0.1:{}", X11_TCP_BASE + display_num as u16);
+    (String::new(), tcp, false)
 }
 
 /// Parse NodeId from string
@@ -318,28 +337,47 @@ async fn run_join(code: &str, display_num: u32) -> Result<()> {
     eprintln!("authenticated!");
 
     let conn = Arc::new(conn);
-    let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
 
-    eprintln!("DISPLAY=:{} ready", display_num);
+    #[cfg(unix)]
+    {
+        let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
+        eprintln!("DISPLAY=:{} ready", display_num);
 
-    loop {
-        tokio::select! {
-            Ok((stream, _)) = unix_listener.accept() => {
-                let conn = Arc::clone(&conn);
-                tokio::spawn(async move {
-                    if let Err(e) = forward_to_quic_unix(stream, conn).await {
-                        eprintln!("x11 error: {e}");
-                    }
-                });
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = unix_listener.accept() => {
+                    let conn = Arc::clone(&conn);
+                    tokio::spawn(async move {
+                        if let Err(e) = forward_to_quic_unix(stream, conn).await {
+                            eprintln!("x11 error: {e}");
+                        }
+                    });
+                }
+                Ok((stream, _)) = tcp_listener.accept() => {
+                    let conn = Arc::clone(&conn);
+                    tokio::spawn(async move {
+                        if let Err(e) = forward_to_quic_tcp(stream, conn).await {
+                            eprintln!("x11 error: {e}");
+                        }
+                    });
+                }
             }
-            Ok((stream, _)) = tcp_listener.accept() => {
-                let conn = Arc::clone(&conn);
-                tokio::spawn(async move {
-                    if let Err(e) = forward_to_quic_tcp(stream, conn).await {
-                        eprintln!("x11 error: {e}");
-                    }
-                });
-            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let tcp_listener = create_x11_listener_tcp(display_num).await?;
+        eprintln!("DISPLAY=localhost:{} ready", display_num);
+
+        loop {
+            let (stream, _) = tcp_listener.accept().await?;
+            let conn = Arc::clone(&conn);
+            tokio::spawn(async move {
+                if let Err(e) = forward_to_quic_tcp(stream, conn).await {
+                    eprintln!("x11 error: {e}");
+                }
+            });
         }
     }
 }
@@ -384,7 +422,9 @@ async fn run_server(display: &str, bind: Option<&str>) -> Result<()> {
         let x11_tcp = x11_tcp.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_server_connection(conn, &x11_socket, &x11_tcp, use_unix, remote_id).await {
+            if let Err(e) =
+                handle_server_connection(conn, &x11_socket, &x11_tcp, use_unix, remote_id).await
+            {
                 eprintln!("[{}] error: {e}", &remote_id.to_string()[..8]);
             }
         });
@@ -410,9 +450,15 @@ async fn handle_server_connection(
         let x11_tcp = x11_tcp.to_string();
 
         tokio::spawn(async move {
+            #[cfg(unix)]
             let result = if use_unix {
                 proxy_to_unix(quic_send, quic_recv, &x11_socket).await
             } else {
+                proxy_to_tcp(quic_send, quic_recv, &x11_tcp).await
+            };
+            #[cfg(not(unix))]
+            let result = {
+                let _ = (use_unix, x11_socket); // suppress warnings
                 proxy_to_tcp(quic_send, quic_recv, &x11_tcp).await
             };
             if let Err(e) = result {
@@ -441,7 +487,8 @@ async fn run_client(node_id: &str, display_num: u32, addr_hint: Option<&str>) ->
 
     // Add direct address hint if provided
     if let Some(addr) = addr_hint {
-        node_addr = node_addr.with_direct_addresses([addr.parse().context("invalid address hint")?]);
+        node_addr =
+            node_addr.with_direct_addresses([addr.parse().context("invalid address hint")?]);
     }
 
     // Connect (iroh handles holepunching automatically)
@@ -451,41 +498,59 @@ async fn run_client(node_id: &str, display_num: u32, addr_hint: Option<&str>) ->
 
     eprintln!("connected to {}", &remote_id.to_string()[..8]);
 
-    let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
+    #[cfg(unix)]
+    {
+        let (unix_listener, tcp_listener) = create_x11_listeners(display_num).await?;
+        eprintln!("X11 proxy ready - DISPLAY=:{}", display_num);
 
-    eprintln!("X11 proxy ready - DISPLAY=:{}", display_num);
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = unix_listener.accept() => {
+                    let conn = Arc::clone(&conn);
+                    tokio::spawn(async move {
+                        if let Err(e) = forward_to_quic_unix(stream, conn).await {
+                            eprintln!("x11 error: {e}");
+                        }
+                    });
+                }
+                Ok((stream, _)) = tcp_listener.accept() => {
+                    let conn = Arc::clone(&conn);
+                    tokio::spawn(async move {
+                        if let Err(e) = forward_to_quic_tcp(stream, conn).await {
+                            eprintln!("x11 error: {e}");
+                        }
+                    });
+                }
+            }
+        }
+    }
 
-    loop {
-        tokio::select! {
-            Ok((stream, _)) = unix_listener.accept() => {
-                let conn = Arc::clone(&conn);
-                tokio::spawn(async move {
-                    if let Err(e) = forward_to_quic_unix(stream, conn).await {
-                        eprintln!("x11 error: {e}");
-                    }
-                });
-            }
-            Ok((stream, _)) = tcp_listener.accept() => {
-                let conn = Arc::clone(&conn);
-                tokio::spawn(async move {
-                    if let Err(e) = forward_to_quic_tcp(stream, conn).await {
-                        eprintln!("x11 error: {e}");
-                    }
-                });
-            }
+    #[cfg(not(unix))]
+    {
+        let tcp_listener = create_x11_listener_tcp(display_num).await?;
+        eprintln!("X11 proxy ready - DISPLAY=localhost:{}", display_num);
+
+        loop {
+            let (stream, _) = tcp_listener.accept().await?;
+            let conn = Arc::clone(&conn);
+            tokio::spawn(async move {
+                if let Err(e) = forward_to_quic_tcp(stream, conn).await {
+                    eprintln!("x11 error: {e}");
+                }
+            });
         }
     }
 }
 
 // Helper functions
 
+#[cfg(unix)]
 async fn create_x11_listeners(display_num: u32) -> Result<(UnixListener, TcpListener)> {
     let x11_socket = format!("{}/X{}", X11_UNIX_DIR, display_num);
     let _ = std::fs::remove_file(&x11_socket);
     std::fs::create_dir_all(X11_UNIX_DIR).ok();
 
-    let unix_listener =
-        UnixListener::bind(&x11_socket).context("failed to create X11 socket")?;
+    let unix_listener = UnixListener::bind(&x11_socket).context("failed to create X11 socket")?;
 
     let tcp_port = X11_TCP_BASE + display_num as u16;
     let tcp_listener = TcpListener::bind(format!("127.0.0.1:{}", tcp_port))
@@ -495,6 +560,16 @@ async fn create_x11_listeners(display_num: u32) -> Result<(UnixListener, TcpList
     Ok((unix_listener, tcp_listener))
 }
 
+#[cfg(not(unix))]
+async fn create_x11_listener_tcp(display_num: u32) -> Result<TcpListener> {
+    let tcp_port = X11_TCP_BASE + display_num as u16;
+    let tcp_listener = TcpListener::bind(format!("127.0.0.1:{}", tcp_port))
+        .await
+        .context("failed to bind X11 TCP port")?;
+    Ok(tcp_listener)
+}
+
+#[cfg(unix)]
 async fn proxy_to_unix(
     mut quic_send: iroh::endpoint::SendStream,
     mut quic_recv: iroh::endpoint::RecvStream,
@@ -525,7 +600,11 @@ async fn proxy_to_tcp(
     Ok(())
 }
 
-async fn forward_to_quic_unix(unix: UnixStream, conn: Arc<iroh::endpoint::Connection>) -> Result<()> {
+#[cfg(unix)]
+async fn forward_to_quic_unix(
+    unix: UnixStream,
+    conn: Arc<iroh::endpoint::Connection>,
+) -> Result<()> {
     let (quic_send, quic_recv) = conn.open_bi().await?;
     let (mut unix_read, mut unix_write) = unix.into_split();
     let (mut quic_send, mut quic_recv) = (quic_send, quic_recv);

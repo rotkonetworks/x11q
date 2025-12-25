@@ -16,15 +16,18 @@ use x11rb::protocol::xtest::ConnectionExt as XTestExt;
 const ALPN: &[u8] = b"x11quic-mirror/1";
 
 // Message types for the protocol
-const MSG_FRAME: u8 = 1;      // Full or partial frame data
-const MSG_CURSOR: u8 = 2;     // Cursor position update
-const MSG_KEY: u8 = 3;        // Keyboard event
-const MSG_MOUSE: u8 = 4;      // Mouse button event
-const MSG_MOTION: u8 = 5;     // Mouse motion event
+const MSG_FRAME: u8 = 1; // Full or partial frame data
+#[allow(dead_code)]
+const MSG_CURSOR: u8 = 2; // Cursor position update
+const MSG_KEY: u8 = 3; // Keyboard event
+const MSG_MOUSE: u8 = 4; // Mouse button event
+const MSG_MOTION: u8 = 5; // Mouse motion event
 
 /// Server: captures screen and streams to client
 pub async fn run_mirror_server(display: &str, bind: Option<&str>) -> Result<()> {
-    let display_num: u32 = display.trim_start_matches(':').parse()
+    let display_num: u32 = display
+        .trim_start_matches(':')
+        .parse()
         .context("invalid display number")?;
 
     // Connect to X11
@@ -40,8 +43,13 @@ pub async fn run_mirror_server(display: &str, bind: Option<&str>) -> Result<()> 
     eprintln!("Screen: {}x{}", width, height);
 
     // Check for SHM extension
-    let shm_supported = conn.extension_information(shm::X11_EXTENSION_NAME)?.is_some();
-    eprintln!("SHM extension: {}", if shm_supported { "yes" } else { "no (slower)" });
+    let shm_supported = conn
+        .extension_information(shm::X11_EXTENSION_NAME)?
+        .is_some();
+    eprintln!(
+        "SHM extension: {}",
+        if shm_supported { "yes" } else { "no (slower)" }
+    );
 
     // Set up iroh endpoint
     let mut builder = Endpoint::builder().alpns(vec![ALPN.to_vec()]);
@@ -104,9 +112,7 @@ async fn handle_viewer(
 
     // Spawn input handler
     let x_conn_input = Arc::clone(&x_conn);
-    let input_handle = tokio::spawn(async move {
-        handle_input(recv, x_conn_input).await
-    });
+    let input_handle = tokio::spawn(async move { handle_input(recv, x_conn_input).await });
 
     // Capture and send frames
     let mut last_frame: Vec<u8> = vec![0; (width * height * 4) as usize];
@@ -114,13 +120,17 @@ async fn handle_viewer(
 
     loop {
         // Capture screen
-        let image = x_conn.get_image(
-            ImageFormat::Z_PIXMAP,
-            root,
-            0, 0,
-            width as u16, height as u16,
-            !0,
-        )?.reply()?;
+        let image = x_conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                root,
+                0,
+                0,
+                width as u16,
+                height as u16,
+                !0,
+            )?
+            .reply()?;
 
         let pixels = &image.data;
 
@@ -135,11 +145,14 @@ async fn handle_viewer(
             let a = if chunk.len() > 3 { chunk[3] } else { 255 };
 
             let idx = i * 4;
-            if !changed && idx + 3 < last_frame.len() {
-                if last_frame[idx] != r || last_frame[idx + 1] != g ||
-                   last_frame[idx + 2] != b || last_frame[idx + 3] != a {
-                    changed = true;
-                }
+            if !changed
+                && idx + 3 < last_frame.len()
+                && (last_frame[idx] != r
+                    || last_frame[idx + 1] != g
+                    || last_frame[idx + 2] != b
+                    || last_frame[idx + 3] != a)
+            {
+                changed = true;
             }
 
             frame.push(r);
@@ -154,14 +167,20 @@ async fn handle_viewer(
 
             // Send frame
             send.write_all(&[MSG_FRAME]).await?;
-            send.write_all(&(compressed.len() as u32).to_le_bytes()).await?;
+            send.write_all(&(compressed.len() as u32).to_le_bytes())
+                .await?;
             send.write_all(&compressed).await?;
 
             last_frame = frame;
 
-            if frame_count % 60 == 0 {
-                eprintln!("frame {} - {}x{} compressed {}KB",
-                    frame_count, width, height, compressed.len() / 1024);
+            if frame_count.is_multiple_of(60) {
+                eprintln!(
+                    "frame {} - {}x{} compressed {}KB",
+                    frame_count,
+                    width,
+                    height,
+                    compressed.len() / 1024
+                );
             }
         }
 
@@ -202,7 +221,9 @@ async fn handle_input(
                     keycode,
                     0,
                     x_conn.setup().roots[0].root,
-                    0, 0, 0,
+                    0,
+                    0,
+                    0,
                 )?;
                 x_conn.flush()?;
             }
@@ -216,7 +237,9 @@ async fn handle_input(
                     button,
                     0,
                     x_conn.setup().roots[0].root,
-                    0, 0, 0,
+                    0,
+                    0,
+                    0,
                 )?;
                 x_conn.flush()?;
             }
@@ -230,7 +253,9 @@ async fn handle_input(
                     0,
                     0,
                     x_conn.setup().roots[0].root,
-                    x, y, 0,
+                    x,
+                    y,
+                    0,
                 )?;
                 x_conn.flush()?;
             }
@@ -243,8 +268,7 @@ async fn handle_input(
 
 /// Client: displays remote screen and sends input
 pub async fn run_mirror_client(node_id: &str, addr_hint: Option<&str>) -> Result<()> {
-    let remote_node_id = NodeId::from_str(node_id)
-        .context("invalid node id")?;
+    let remote_node_id = NodeId::from_str(node_id).context("invalid node id")?;
 
     let endpoint = Endpoint::builder()
         .alpns(vec![ALPN.to_vec()])
@@ -286,7 +310,8 @@ pub async fn run_mirror_client(node_id: &str, addr_hint: Option<&str>) -> Result
             scale: minifb::Scale::X1,
             ..Default::default()
         },
-    ).context("failed to create window")?;
+    )
+    .context("failed to create window")?;
 
     window.set_target_fps(60);
 
@@ -299,8 +324,10 @@ pub async fn run_mirror_client(node_id: &str, addr_hint: Option<&str>) -> Result
         let mut msg_type = [0u8; 1];
         match tokio::time::timeout(
             tokio::time::Duration::from_millis(5),
-            recv.read_exact(&mut msg_type)
-        ).await {
+            recv.read_exact(&mut msg_type),
+        )
+        .await
+        {
             Ok(Ok(_)) if msg_type[0] == MSG_FRAME => {
                 // Read compressed frame size
                 let mut size_buf = [0u8; 4];
@@ -348,7 +375,11 @@ pub async fn run_mirror_client(node_id: &str, addr_hint: Option<&str>) -> Result
         }
 
         // Send mouse button events
-        for (button, code) in [(MouseButton::Left, 1u8), (MouseButton::Middle, 2), (MouseButton::Right, 3)] {
+        for (button, code) in [
+            (MouseButton::Left, 1u8),
+            (MouseButton::Middle, 2),
+            (MouseButton::Right, 3),
+        ] {
             if window.get_mouse_down(button) {
                 send.write_all(&[MSG_MOUSE, code, 1]).await?;
             }
@@ -380,26 +411,67 @@ pub async fn run_mirror_client(node_id: &str, addr_hint: Option<&str>) -> Result
 fn key_to_x11_keycode(key: Key) -> Option<u8> {
     // Map minifb keys to X11 keycodes
     Some(match key {
-        Key::A => 38, Key::B => 56, Key::C => 54, Key::D => 40,
-        Key::E => 26, Key::F => 41, Key::G => 42, Key::H => 43,
-        Key::I => 31, Key::J => 44, Key::K => 45, Key::L => 46,
-        Key::M => 58, Key::N => 57, Key::O => 32, Key::P => 33,
-        Key::Q => 24, Key::R => 27, Key::S => 39, Key::T => 28,
-        Key::U => 30, Key::V => 55, Key::W => 25, Key::X => 53,
-        Key::Y => 29, Key::Z => 52,
-        Key::Key0 => 19, Key::Key1 => 10, Key::Key2 => 11, Key::Key3 => 12,
-        Key::Key4 => 13, Key::Key5 => 14, Key::Key6 => 15, Key::Key7 => 16,
-        Key::Key8 => 17, Key::Key9 => 18,
-        Key::Space => 65, Key::Enter => 36, Key::Escape => 9,
-        Key::Backspace => 22, Key::Tab => 23,
-        Key::Left => 113, Key::Right => 114, Key::Up => 111, Key::Down => 116,
+        Key::A => 38,
+        Key::B => 56,
+        Key::C => 54,
+        Key::D => 40,
+        Key::E => 26,
+        Key::F => 41,
+        Key::G => 42,
+        Key::H => 43,
+        Key::I => 31,
+        Key::J => 44,
+        Key::K => 45,
+        Key::L => 46,
+        Key::M => 58,
+        Key::N => 57,
+        Key::O => 32,
+        Key::P => 33,
+        Key::Q => 24,
+        Key::R => 27,
+        Key::S => 39,
+        Key::T => 28,
+        Key::U => 30,
+        Key::V => 55,
+        Key::W => 25,
+        Key::X => 53,
+        Key::Y => 29,
+        Key::Z => 52,
+        Key::Key0 => 19,
+        Key::Key1 => 10,
+        Key::Key2 => 11,
+        Key::Key3 => 12,
+        Key::Key4 => 13,
+        Key::Key5 => 14,
+        Key::Key6 => 15,
+        Key::Key7 => 16,
+        Key::Key8 => 17,
+        Key::Key9 => 18,
+        Key::Space => 65,
+        Key::Enter => 36,
+        Key::Escape => 9,
+        Key::Backspace => 22,
+        Key::Tab => 23,
+        Key::Left => 113,
+        Key::Right => 114,
+        Key::Up => 111,
+        Key::Down => 116,
         Key::LeftShift | Key::RightShift => 50,
         Key::LeftCtrl | Key::RightCtrl => 37,
         Key::LeftAlt | Key::RightAlt => 64,
         Key::LeftSuper | Key::RightSuper => 133,
-        Key::F1 => 67, Key::F2 => 68, Key::F3 => 69, Key::F4 => 70,
-        Key::F5 => 71, Key::F6 => 72, Key::F7 => 73, Key::F8 => 74,
-        Key::F9 => 75, Key::F10 => 76, Key::F11 => 95, Key::F12 => 96,
+        Key::F1 => 67,
+        Key::F2 => 68,
+        Key::F3 => 69,
+        Key::F4 => 70,
+        Key::F5 => 71,
+        Key::F6 => 72,
+        Key::F7 => 73,
+        Key::F8 => 74,
+        Key::F9 => 75,
+        Key::F10 => 76,
+        Key::F11 => 95,
+        Key::F12 => 96,
         _ => return None,
     })
 }

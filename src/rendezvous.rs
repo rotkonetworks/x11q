@@ -7,8 +7,8 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use iroh::NodeId;
+use pkarr::dns::{rdata::TXT, Name};
 use pkarr::{Client as PkarrClient, Keypair, SignedPacket};
-use pkarr::dns::{Name, rdata::TXT};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
@@ -22,39 +22,263 @@ const CODE_TTL: u32 = 120;
 /// even words: 2 syllables, odd words: 3 syllables (helps error detection)
 const WORDLIST: [&str; 256] = [
     // even (2 syllables)
-    "aardvark", "absurd", "accrue", "acme", "adrift", "adult", "afflict", "ahead",
-    "aimless", "algol", "allow", "almost", "ammo", "ancient", "apple", "artist",
-    "assume", "atlas", "awesome", "axle", "baboon", "backfield", "backward", "banjo",
-    "beaming", "bedlamp", "beehive", "beeswax", "befriend", "belfast", "berserk", "billiard",
-    "bison", "blackjack", "blockade", "blowtorch", "bluebird", "bombast", "bookshelf", "brackish",
-    "breadline", "breakup", "brickyard", "briefcase", "burbank", "button", "buzzard", "cement",
-    "chairlift", "chatter", "checkup", "chessman", "chico", "chisel", "choking", "classic",
-    "classroom", "cleanup", "clockwork", "cobra", "commence", "concert", "cowbell", "crackdown",
-    "cranky", "crayon", "crossbow", "crowfoot", "crucial", "crusade", "cubic", "dashboard",
-    "deadbolt", "deckhand", "decode", "detour", "digital", "diploma", "disrupt", "distant",
-    "diver", "doorstep", "dosage", "dotted", "dragon", "dreadful", "drifter", "dropout",
-    "drumbeat", "drunken", "duplex", "dwelling", "eating", "edict", "egghead", "eightball",
-    "endorse", "endow", "enlist", "erase", "escape", "exceed", "eyeglass", "eyetooth",
-    "facial", "fallout", "flagpole", "flatfoot", "flytrap", "fracture", "framework", "freedom",
-    "frighten", "gazelle", "geiger", "glasgow", "glitter", "glucose", "goggles", "goldfish",
-    "gremlin", "guidance", "hamlet", "hamster", "handiwork", "headwaters", "highchair", "hockey",
+    "aardvark",
+    "absurd",
+    "accrue",
+    "acme",
+    "adrift",
+    "adult",
+    "afflict",
+    "ahead",
+    "aimless",
+    "algol",
+    "allow",
+    "almost",
+    "ammo",
+    "ancient",
+    "apple",
+    "artist",
+    "assume",
+    "atlas",
+    "awesome",
+    "axle",
+    "baboon",
+    "backfield",
+    "backward",
+    "banjo",
+    "beaming",
+    "bedlamp",
+    "beehive",
+    "beeswax",
+    "befriend",
+    "belfast",
+    "berserk",
+    "billiard",
+    "bison",
+    "blackjack",
+    "blockade",
+    "blowtorch",
+    "bluebird",
+    "bombast",
+    "bookshelf",
+    "brackish",
+    "breadline",
+    "breakup",
+    "brickyard",
+    "briefcase",
+    "burbank",
+    "button",
+    "buzzard",
+    "cement",
+    "chairlift",
+    "chatter",
+    "checkup",
+    "chessman",
+    "chico",
+    "chisel",
+    "choking",
+    "classic",
+    "classroom",
+    "cleanup",
+    "clockwork",
+    "cobra",
+    "commence",
+    "concert",
+    "cowbell",
+    "crackdown",
+    "cranky",
+    "crayon",
+    "crossbow",
+    "crowfoot",
+    "crucial",
+    "crusade",
+    "cubic",
+    "dashboard",
+    "deadbolt",
+    "deckhand",
+    "decode",
+    "detour",
+    "digital",
+    "diploma",
+    "disrupt",
+    "distant",
+    "diver",
+    "doorstep",
+    "dosage",
+    "dotted",
+    "dragon",
+    "dreadful",
+    "drifter",
+    "dropout",
+    "drumbeat",
+    "drunken",
+    "duplex",
+    "dwelling",
+    "eating",
+    "edict",
+    "egghead",
+    "eightball",
+    "endorse",
+    "endow",
+    "enlist",
+    "erase",
+    "escape",
+    "exceed",
+    "eyeglass",
+    "eyetooth",
+    "facial",
+    "fallout",
+    "flagpole",
+    "flatfoot",
+    "flytrap",
+    "fracture",
+    "framework",
+    "freedom",
+    "frighten",
+    "gazelle",
+    "geiger",
+    "glasgow",
+    "glitter",
+    "glucose",
+    "goggles",
+    "goldfish",
+    "gremlin",
+    "guidance",
+    "hamlet",
+    "hamster",
+    "handiwork",
+    "headwaters",
+    "highchair",
+    "hockey",
     // odd (3 syllables)
-    "hamburger", "hesitate", "hideaway", "holiness", "hurricane", "hydraulic", "idaho", "implicit",
-    "indulge", "inferno", "informant", "insincere", "insurgent", "intestine", "inventive", "japanese",
-    "jupiter", "kickoff", "kingfish", "klaxon", "liberty", "maritime", "miracle", "misnomer",
-    "molasses", "molecule", "montana", "mosquito", "multiple", "nagasaki", "narrative", "nebula",
-    "newsletter", "nominal", "northward", "obscure", "october", "offload", "olive", "openwork",
-    "operator", "optic", "orbit", "osmosis", "outfielder", "pacific", "pandemic", "pandora",
-    "paperweight", "pedigree", "pegasus", "penetrate", "perceptive", "pharmacy", "phonetic", "photograph",
-    "pioneering", "piracy", "playhouse", "populate", "potato", "preclude", "prescribe", "printer",
-    "procedure", "puberty", "publisher", "pyramid", "quantity", "racketeer", "rampant", "reactor",
-    "recipe", "recover", "renegade", "repellent", "replica", "reproduce", "resistor", "responsive",
-    "retina", "retrieval", "revenue", "riverbed", "rosebud", "ruffian", "sailboat", "saturday",
-    "savanna", "scavenger", "sensation", "sequence", "shadowbox", "showgirl", "signify", "simplify",
-    "simulate", "slowdown", "snapshot", "snowcap", "snowslide", "solitude", "southward", "specimen",
-    "speculate", "spellbound", "spheroid", "spigot", "spindle", "steadfast", "steamship", "stockman",
-    "stopwatch", "stormy", "strawberry", "stupendous", "supportive", "surrender", "suspense", "sweatband",
-    "swelter", "tampico", "telephone", "therapist", "tobacco", "tolerance", "tomorrow", "torpedo",
+    "hamburger",
+    "hesitate",
+    "hideaway",
+    "holiness",
+    "hurricane",
+    "hydraulic",
+    "idaho",
+    "implicit",
+    "indulge",
+    "inferno",
+    "informant",
+    "insincere",
+    "insurgent",
+    "intestine",
+    "inventive",
+    "japanese",
+    "jupiter",
+    "kickoff",
+    "kingfish",
+    "klaxon",
+    "liberty",
+    "maritime",
+    "miracle",
+    "misnomer",
+    "molasses",
+    "molecule",
+    "montana",
+    "mosquito",
+    "multiple",
+    "nagasaki",
+    "narrative",
+    "nebula",
+    "newsletter",
+    "nominal",
+    "northward",
+    "obscure",
+    "october",
+    "offload",
+    "olive",
+    "openwork",
+    "operator",
+    "optic",
+    "orbit",
+    "osmosis",
+    "outfielder",
+    "pacific",
+    "pandemic",
+    "pandora",
+    "paperweight",
+    "pedigree",
+    "pegasus",
+    "penetrate",
+    "perceptive",
+    "pharmacy",
+    "phonetic",
+    "photograph",
+    "pioneering",
+    "piracy",
+    "playhouse",
+    "populate",
+    "potato",
+    "preclude",
+    "prescribe",
+    "printer",
+    "procedure",
+    "puberty",
+    "publisher",
+    "pyramid",
+    "quantity",
+    "racketeer",
+    "rampant",
+    "reactor",
+    "recipe",
+    "recover",
+    "renegade",
+    "repellent",
+    "replica",
+    "reproduce",
+    "resistor",
+    "responsive",
+    "retina",
+    "retrieval",
+    "revenue",
+    "riverbed",
+    "rosebud",
+    "ruffian",
+    "sailboat",
+    "saturday",
+    "savanna",
+    "scavenger",
+    "sensation",
+    "sequence",
+    "shadowbox",
+    "showgirl",
+    "signify",
+    "simplify",
+    "simulate",
+    "slowdown",
+    "snapshot",
+    "snowcap",
+    "snowslide",
+    "solitude",
+    "southward",
+    "specimen",
+    "speculate",
+    "spellbound",
+    "spheroid",
+    "spigot",
+    "spindle",
+    "steadfast",
+    "steamship",
+    "stockman",
+    "stopwatch",
+    "stormy",
+    "strawberry",
+    "stupendous",
+    "supportive",
+    "surrender",
+    "suspense",
+    "sweatband",
+    "swelter",
+    "tampico",
+    "telephone",
+    "therapist",
+    "tobacco",
+    "tolerance",
+    "tomorrow",
+    "torpedo",
 ];
 
 /// generate a random code: "N-word-word"
@@ -87,7 +311,9 @@ pub async fn publish_nodeid(code: &str, node_id: NodeId) -> Result<()> {
     // encode nodeid as TXT record
     let node_id_hex = hex::encode(node_id.as_bytes());
     let name = Name::new("_x11q").context("invalid dns name")?;
-    let txt = TXT::new().with_string(&node_id_hex).context("invalid txt")?;
+    let txt = TXT::new()
+        .with_string(&node_id_hex)
+        .context("invalid txt")?;
 
     let packet = SignedPacket::builder()
         .txt(name, txt, CODE_TTL)
@@ -113,13 +339,17 @@ pub async fn resolve_nodeid(code: &str) -> Result<NodeId> {
     for record in packet.resource_records("_x11q") {
         if let pkarr::dns::rdata::RData::TXT(ref txt) = record.rdata {
             // convert TXT to String
-            let txt_str: String = txt.clone().try_into()
+            let txt_str: String = txt
+                .clone()
+                .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid utf8 in txt record"))?;
-            let node_id_bytes = hex::decode(&txt_str)
-                .context("invalid nodeid encoding")?;
-            let node_id = NodeId::from_bytes(&node_id_bytes.try_into()
-                .map_err(|_| anyhow::anyhow!("wrong nodeid length"))?)
-                .context("invalid nodeid")?;
+            let node_id_bytes = hex::decode(&txt_str).context("invalid nodeid encoding")?;
+            let node_id = NodeId::from_bytes(
+                &node_id_bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("wrong nodeid length"))?,
+            )
+            .context("invalid nodeid")?;
             return Ok(node_id);
         }
     }
@@ -140,7 +370,10 @@ impl PakeServer {
             &Identity::new(b"x11q-server"),
             &Identity::new(b"x11q-client"),
         );
-        Self { spake, outbound_msg }
+        Self {
+            spake,
+            outbound_msg,
+        }
     }
 
     pub fn message(&self) -> &[u8] {
@@ -148,7 +381,9 @@ impl PakeServer {
     }
 
     pub fn finish(self, client_msg: &[u8]) -> Result<[u8; 32]> {
-        let key = self.spake.finish(client_msg)
+        let key = self
+            .spake
+            .finish(client_msg)
             .map_err(|_| anyhow::anyhow!("pake failed - wrong code?"))?;
         Ok(key.try_into().expect("spake2 produces 32 byte key"))
     }
@@ -167,7 +402,10 @@ impl PakeClient {
             &Identity::new(b"x11q-server"),
             &Identity::new(b"x11q-client"),
         );
-        Self { spake, outbound_msg }
+        Self {
+            spake,
+            outbound_msg,
+        }
     }
 
     pub fn message(&self) -> &[u8] {
@@ -175,7 +413,9 @@ impl PakeClient {
     }
 
     pub fn finish(self, server_msg: &[u8]) -> Result<[u8; 32]> {
-        let key = self.spake.finish(server_msg)
+        let key = self
+            .spake
+            .finish(server_msg)
             .map_err(|_| anyhow::anyhow!("pake failed - wrong code?"))?;
         Ok(key.try_into().expect("spake2 produces 32 byte key"))
     }

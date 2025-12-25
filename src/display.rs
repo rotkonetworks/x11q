@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+#[cfg(unix)]
 const X11_UNIX_DIR: &str = "/tmp/.X11-unix";
 const X11_TCP_BASE: u16 = 6000;
 
@@ -184,7 +185,6 @@ impl DisplayState {
             }
         }
     }
-
 }
 
 /// X11 protocol handler for a single client
@@ -336,9 +336,7 @@ impl ClientHandler {
         reply.extend_from_slice(&[0u8; 4]);
 
         reply.extend_from_slice(vendor);
-        for _ in 0..vendor_pad {
-            reply.push(0);
-        }
+        reply.extend(std::iter::repeat_n(0u8, vendor_pad));
 
         reply.push(24);
         reply.push(32);
@@ -392,7 +390,14 @@ impl ClientHandler {
         let height = u16::from_le_bytes([data[18], data[19]]).max(1);
 
         let mut state = self.state.lock().await;
-        let window = X11Window::new(parent, x, y, width, height, if depth == 0 { 24 } else { depth });
+        let window = X11Window::new(
+            parent,
+            x,
+            y,
+            width,
+            height,
+            if depth == 0 { 24 } else { depth },
+        );
         state.windows.insert(wid, window);
         if let Some(p) = state.windows.get_mut(&parent) {
             p.children.push(wid);
@@ -868,9 +873,7 @@ impl ClientHandler {
         reply.extend_from_slice(&(name_len as u16).to_le_bytes());
         reply.extend_from_slice(&[0u8; 22]);
         reply.extend_from_slice(name.as_bytes());
-        for _ in 0..pad {
-            reply.push(0);
-        }
+        reply.extend(std::iter::repeat_n(0u8, pad));
         Ok(reply)
     }
 
@@ -1026,11 +1029,7 @@ impl ClientHandler {
         reply.extend_from_slice(&words.to_le_bytes());
         reply.extend_from_slice(&[0u8; 24]);
 
-        for _ in 0..8 {
-            for _ in 0..keycodes_per_mod {
-                reply.push(0);
-            }
-        }
+        reply.extend(std::iter::repeat_n(0u8, 8 * keycodes_per_mod as usize));
         Ok(reply)
     }
 
@@ -1056,8 +1055,12 @@ impl ClientHandler {
                 let num_outputs = 1u16;
                 let num_modes = 1u16;
                 let names_len = 8u16;
-                let length =
-                    (8 + num_crtcs as u32 * 4 + num_outputs as u32 * 4 + num_modes as u32 * 32 + names_len as u32) / 4;
+                let length = (8
+                    + num_crtcs as u32 * 4
+                    + num_outputs as u32 * 4
+                    + num_modes as u32 * 32
+                    + names_len as u32)
+                    / 4;
 
                 let mut reply = vec![1u8];
                 reply.push(0);
@@ -1072,7 +1075,7 @@ impl ClientHandler {
                 reply.extend_from_slice(&[0u8; 8]);
                 reply.extend_from_slice(&1u32.to_le_bytes()); // CRTC ID
                 reply.extend_from_slice(&1u32.to_le_bytes()); // Output ID
-                // Mode info
+                                                              // Mode info
                 reply.extend_from_slice(&1u32.to_le_bytes()); // Mode ID
                 reply.extend_from_slice(&(state.width as u16).to_le_bytes());
                 reply.extend_from_slice(&(state.height as u16).to_le_bytes());
@@ -1295,10 +1298,8 @@ where
 
             pending.drain(..needed);
 
-            if !reply.is_empty() {
-                if stream.write_all(&reply).await.is_err() {
-                    return;
-                }
+            if !reply.is_empty() && stream.write_all(&reply).await.is_err() {
+                return;
             }
         }
     }
@@ -1315,7 +1316,10 @@ pub async fn run_display(display_num: u32, width: u32, height: u32) -> Result<()
     // TCP listener (works on all platforms including Windows)
     let tcp_port = X11_TCP_BASE + display_num as u16;
     let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", tcp_port)).await?;
-    eprintln!("listening on TCP port {} (DISPLAY=hostname:{})", tcp_port, display_num);
+    eprintln!(
+        "listening on TCP port {} (DISPLAY=hostname:{})",
+        tcp_port, display_num
+    );
 
     // Unix socket (only on Unix platforms)
     #[cfg(unix)]
@@ -1324,12 +1328,15 @@ pub async fn run_display(display_num: u32, width: u32, height: u32) -> Result<()
         let _ = std::fs::remove_file(&socket_path);
         std::fs::create_dir_all(X11_UNIX_DIR)?;
         let listener = UnixListener::bind(&socket_path)?;
-        eprintln!("listening on Unix socket {} (DISPLAY=:{})", socket_path, display_num);
+        eprintln!(
+            "listening on Unix socket {} (DISPLAY=:{})",
+            socket_path, display_num
+        );
         Some(listener)
     };
 
     #[cfg(not(unix))]
-    let unix_listener: Option<()> = None;
+    let _unix_listener: Option<()> = None;
 
     // Spawn connection acceptor
     let state_clone = Arc::clone(&state);

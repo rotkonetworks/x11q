@@ -33,7 +33,10 @@ impl TestServer {
         // RANDR: major_opcode=140, first_event=89, first_error=147
         extensions.insert("RANDR".to_string(), (RANDR_MAJOR_OPCODE, 89, 147));
         // XInputExtension: major_opcode=131, first_event=147, first_error=135
-        extensions.insert("XInputExtension".to_string(), (XINPUT_MAJOR_OPCODE, 147, 135));
+        extensions.insert(
+            "XInputExtension".to_string(),
+            (XINPUT_MAJOR_OPCODE, 147, 135),
+        );
         // XKEYBOARD: major_opcode=135, first_event=85, first_error=137
         extensions.insert("XKEYBOARD".to_string(), (XKB_MAJOR_OPCODE, 85, 137));
         // Generic Event Extension: major_opcode=128, first_event=0, first_error=0
@@ -73,63 +76,63 @@ impl TestServer {
         let opcode = data[0];
 
         match opcode {
-            1 => Ok(Vec::new()), // CreateWindow - no reply
-            2 => Ok(Vec::new()), // ChangeWindowAttributes - no reply
-            3 => self.get_window_attributes(data), // GetWindowAttributes
-            8 => Ok(Vec::new()), // MapWindow - no reply
-            9 => Ok(Vec::new()), // DestroySubwindows - no reply
-            10 => Ok(Vec::new()), // UnmapWindow - no reply
-            11 => Ok(Vec::new()), // UnmapSubwindows - no reply
-            4 => Ok(Vec::new()), // DestroyWindow - no reply
-            5 => Ok(Vec::new()), // DestroySubwindows - duplicate check
-            6 => Ok(Vec::new()), // ChangeSaveSet - no reply
-            7 => Ok(Vec::new()), // ReparentWindow - no reply
-            12 => Ok(Vec::new()), // ConfigureWindow - no reply
-            13 => Ok(Vec::new()), // CirculateWindow - no reply
-            14 => self.get_geometry(data), // GetGeometry
-            15 => self.query_tree(data), // QueryTree
-            16 => self.intern_atom(data), // InternAtom
-            17 => self.get_atom_name(data), // GetAtomName
-            18 => Ok(Vec::new()), // ChangeProperty - no reply
-            20 => self.get_property(data), // GetProperty
-            22 => Ok(Vec::new()), // SetSelectionOwner - no reply
-            23 => self.get_selection_owner(data), // GetSelectionOwner
-            24 => Ok(Vec::new()), // ConvertSelection - no reply
-            38 => self.query_pointer(data), // QueryPointer
-            42 => Ok(Vec::new()), // SetInputFocus - no reply
-            43 => self.get_input_focus(), // GetInputFocus
-            55 => Ok(Vec::new()), // CreateGC - no reply
-            98 => self.query_extension(data), // QueryExtension
-            101 => self.get_keyboard_mapping(data), // GetKeyboardMapping
-            119 => self.get_modifier_mapping(), // GetModifierMapping
-            44 => self.list_fonts_with_info(), // ListFontsWithInfo - return empty
-            45 => Ok(Vec::new()), // OpenFont - no reply
-            47 => self.query_font(), // QueryFont
-            53 => Ok(Vec::new()), // CreatePixmap - no reply
-            54 => Ok(Vec::new()), // FreePixmap - no reply
-            60 => Ok(Vec::new()), // FreeGC - no reply
-            61 => Ok(Vec::new()), // ClearArea - no reply
-            62 => Ok(Vec::new()), // CopyArea - no reply
-            63 => Ok(Vec::new()), // CopyPlane - no reply
-            64 => Ok(Vec::new()), // PolyPoint - no reply
-            65 => Ok(Vec::new()), // PolyLine - no reply
-            66 => Ok(Vec::new()), // PolySegment - no reply
-            67 => Ok(Vec::new()), // PolyRectangle - no reply
-            68 => Ok(Vec::new()), // PolyArc - no reply
-            69 => Ok(Vec::new()), // FillPoly - no reply
-            70 => Ok(Vec::new()), // PolyFillRectangle - no reply
-            71 => Ok(Vec::new()), // PolyFillArc - no reply
-            72 => Ok(Vec::new()), // PutImage - no reply
-            73 => self.get_image(data), // GetImage
-            78 => Ok(Vec::new()), // CreateColormap - no reply
-            84 => self.alloc_color(data), // AllocColor
-            91 => self.query_colors(data), // QueryColors
-            97 => self.query_best_size(data), // QueryBestSize
-            99 => self.query_keymap(), // QueryKeymap
-            RANDR_MAJOR_OPCODE => self.handle_randr(data), // RandR extension
+            1 => Ok(Vec::new()),                             // CreateWindow - no reply
+            2 => Ok(Vec::new()),                             // ChangeWindowAttributes - no reply
+            3 => self.get_window_attributes(data),           // GetWindowAttributes
+            8 => Ok(Vec::new()),                             // MapWindow - no reply
+            9 => Ok(Vec::new()),                             // DestroySubwindows - no reply
+            10 => Ok(Vec::new()),                            // UnmapWindow - no reply
+            11 => Ok(Vec::new()),                            // UnmapSubwindows - no reply
+            4 => Ok(Vec::new()),                             // DestroyWindow - no reply
+            5 => Ok(Vec::new()),                             // DestroySubwindows - duplicate check
+            6 => Ok(Vec::new()),                             // ChangeSaveSet - no reply
+            7 => Ok(Vec::new()),                             // ReparentWindow - no reply
+            12 => Ok(Vec::new()),                            // ConfigureWindow - no reply
+            13 => Ok(Vec::new()),                            // CirculateWindow - no reply
+            14 => self.get_geometry(data),                   // GetGeometry
+            15 => self.query_tree(data),                     // QueryTree
+            16 => self.intern_atom(data),                    // InternAtom
+            17 => self.get_atom_name(data),                  // GetAtomName
+            18 => Ok(Vec::new()),                            // ChangeProperty - no reply
+            20 => self.get_property(data),                   // GetProperty
+            22 => Ok(Vec::new()),                            // SetSelectionOwner - no reply
+            23 => self.get_selection_owner(data),            // GetSelectionOwner
+            24 => Ok(Vec::new()),                            // ConvertSelection - no reply
+            38 => self.query_pointer(data),                  // QueryPointer
+            42 => Ok(Vec::new()),                            // SetInputFocus - no reply
+            43 => self.get_input_focus(),                    // GetInputFocus
+            55 => Ok(Vec::new()),                            // CreateGC - no reply
+            98 => self.query_extension(data),                // QueryExtension
+            101 => self.get_keyboard_mapping(data),          // GetKeyboardMapping
+            119 => self.get_modifier_mapping(),              // GetModifierMapping
+            44 => self.list_fonts_with_info(),               // ListFontsWithInfo - return empty
+            45 => Ok(Vec::new()),                            // OpenFont - no reply
+            47 => self.query_font(),                         // QueryFont
+            53 => Ok(Vec::new()),                            // CreatePixmap - no reply
+            54 => Ok(Vec::new()),                            // FreePixmap - no reply
+            60 => Ok(Vec::new()),                            // FreeGC - no reply
+            61 => Ok(Vec::new()),                            // ClearArea - no reply
+            62 => Ok(Vec::new()),                            // CopyArea - no reply
+            63 => Ok(Vec::new()),                            // CopyPlane - no reply
+            64 => Ok(Vec::new()),                            // PolyPoint - no reply
+            65 => Ok(Vec::new()),                            // PolyLine - no reply
+            66 => Ok(Vec::new()),                            // PolySegment - no reply
+            67 => Ok(Vec::new()),                            // PolyRectangle - no reply
+            68 => Ok(Vec::new()),                            // PolyArc - no reply
+            69 => Ok(Vec::new()),                            // FillPoly - no reply
+            70 => Ok(Vec::new()),                            // PolyFillRectangle - no reply
+            71 => Ok(Vec::new()),                            // PolyFillArc - no reply
+            72 => Ok(Vec::new()),                            // PutImage - no reply
+            73 => self.get_image(data),                      // GetImage
+            78 => Ok(Vec::new()),                            // CreateColormap - no reply
+            84 => self.alloc_color(data),                    // AllocColor
+            91 => self.query_colors(data),                   // QueryColors
+            97 => self.query_best_size(data),                // QueryBestSize
+            99 => self.query_keymap(),                       // QueryKeymap
+            RANDR_MAJOR_OPCODE => self.handle_randr(data),   // RandR extension
             XINPUT_MAJOR_OPCODE => self.handle_xinput(data), // XInput extension
-            XKB_MAJOR_OPCODE => self.handle_xkb(data), // XKB extension
-            128 => self.handle_ge(data), // Generic Event Extension
+            XKB_MAJOR_OPCODE => self.handle_xkb(data),       // XKB extension
+            128 => self.handle_ge(data),                     // Generic Event Extension
             _ => {
                 eprintln!("unhandled opcode: {} (len {} bytes)", opcode, data.len());
                 Ok(Vec::new())
@@ -147,7 +150,8 @@ impl TestServer {
         let screen_size = 40;
         let depth_size = 8 + 24;
         let fixed_size = 32;
-        let additional_data_len = fixed_size + vendor_total + format_size + screen_size + depth_size;
+        let additional_data_len =
+            fixed_size + vendor_total + format_size + screen_size + depth_size;
         let additional_words = additional_data_len / 4;
 
         let mut reply = Vec::with_capacity(8 + additional_data_len);
@@ -174,9 +178,7 @@ impl TestServer {
         reply.extend_from_slice(&[0u8; 4]);
 
         reply.extend_from_slice(vendor);
-        for _ in 0..vendor_pad {
-            reply.push(0);
-        }
+        reply.extend(std::iter::repeat_n(0u8, vendor_pad));
 
         reply.push(24);
         reply.push(32);
@@ -279,7 +281,7 @@ impl TestServer {
     fn intern_atom(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         let only_if_exists = data[1] != 0;
         let name_len = u16::from_le_bytes([data[4], data[5]]) as usize;
-        let name = String::from_utf8_lossy(&data[8..8+name_len]).to_string();
+        let name = String::from_utf8_lossy(&data[8..8 + name_len]).to_string();
 
         let atom = if let Some(&id) = self.atoms.get(&name) {
             id
@@ -303,7 +305,9 @@ impl TestServer {
 
     fn get_atom_name(&self, data: &[u8]) -> Result<Vec<u8>> {
         let atom = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let name = self.atoms.iter()
+        let name = self
+            .atoms
+            .iter()
             .find(|(_, &v)| v == atom)
             .map(|(k, _)| k.as_str())
             .unwrap_or("");
@@ -318,9 +322,7 @@ impl TestServer {
         reply.extend_from_slice(&(name_len as u16).to_le_bytes());
         reply.extend_from_slice(&[0u8; 22]);
         reply.extend_from_slice(name.as_bytes());
-        for _ in 0..pad {
-            reply.push(0);
-        }
+        reply.extend(std::iter::repeat_n(0u8, pad));
         Ok(reply)
     }
 
@@ -374,7 +376,8 @@ impl TestServer {
 
     fn query_extension(&self, data: &[u8]) -> Result<Vec<u8>> {
         let name_len = u16::from_le_bytes([data[4], data[5]]) as usize;
-        let name = String::from_utf8_lossy(&data[8..8.min(data.len()).max(8+name_len)]).to_string();
+        let name =
+            String::from_utf8_lossy(&data[8..8.min(data.len()).max(8 + name_len)]).to_string();
         eprintln!("QueryExtension: {}", name);
 
         let mut reply = vec![1u8];
@@ -437,11 +440,7 @@ impl TestServer {
         reply.extend_from_slice(&[0u8; 24]);
 
         // 8 modifiers, keycodes_per_mod each
-        for _ in 0..8 {
-            for _ in 0..keycodes_per_mod {
-                reply.push(0);
-            }
-        }
+        reply.extend(std::iter::repeat_n(0u8, 8 * keycodes_per_mod as usize));
         Ok(reply)
     }
 
@@ -456,12 +455,12 @@ impl TestServer {
         reply.push(0); // unused
         reply.extend_from_slice(&self.sequence.to_le_bytes());
         reply.extend_from_slice(&0u32.to_le_bytes()); // length = 0 (no additional data)
-        // The rest of the 32-byte reply: 24 bytes of key state (only first 24 bytes)
-        // Actually for QueryKeymap, the spec says 32 bytes of keys. Let me look again...
-        // Reply: 1 + 1 + 2 + 4 + 32-byte-keys = 40? No wait, the 32 is in addition.
-        // X11 spec: REPLY header is always 32 bytes. QueryKeymap has keys[32] as "variable"
-        // But since length encodes it, length=2 means 8 bytes extra...
-        // Let's just return the standard 32-byte reply with no extra data
+                                                      // The rest of the 32-byte reply: 24 bytes of key state (only first 24 bytes)
+                                                      // Actually for QueryKeymap, the spec says 32 bytes of keys. Let me look again...
+                                                      // Reply: 1 + 1 + 2 + 4 + 32-byte-keys = 40? No wait, the 32 is in addition.
+                                                      // X11 spec: REPLY header is always 32 bytes. QueryKeymap has keys[32] as "variable"
+                                                      // But since length encodes it, length=2 means 8 bytes extra...
+                                                      // Let's just return the standard 32-byte reply with no extra data
         reply.extend_from_slice(&[0u8; 24]); // fill to 32 bytes total
         Ok(reply)
     }
@@ -482,7 +481,7 @@ impl TestServer {
         reply.push(0);
         reply.extend_from_slice(&self.sequence.to_le_bytes());
         reply.extend_from_slice(&7u32.to_le_bytes()); // length (7 words min)
-        // Fill with zeros (default font properties)
+                                                      // Fill with zeros (default font properties)
         reply.extend_from_slice(&[0u8; 28]); // remaining fixed part
         Ok(reply)
     }
@@ -616,7 +615,12 @@ impl TestServer {
         let num_modes = 1u16;
         let names_len = 8u16; // "default" + padding
 
-        let length = (8 + num_crtcs as u32 * 4 + num_outputs as u32 * 4 + num_modes as u32 * 32 + names_len as u32) / 4;
+        let length = (8
+            + num_crtcs as u32 * 4
+            + num_outputs as u32 * 4
+            + num_modes as u32 * 32
+            + names_len as u32)
+            / 4;
 
         let mut reply = vec![1u8];
         reply.push(0);
@@ -644,7 +648,7 @@ impl TestServer {
         reply.extend_from_slice(&(self.height as u16).to_le_bytes());
         // dotClock
         reply.extend_from_slice(&60000000u32.to_le_bytes()); // 60MHz
-        // hSyncStart, hSyncEnd, hTotal
+                                                             // hSyncStart, hSyncEnd, hTotal
         reply.extend_from_slice(&(self.width as u16).to_le_bytes());
         reply.extend_from_slice(&(self.width as u16).to_le_bytes());
         reply.extend_from_slice(&(self.width as u16).to_le_bytes());
@@ -671,7 +675,12 @@ impl TestServer {
         let num_clones = 0u16;
         let name_len = 7u16; // "default"
 
-        let length = (12 + num_crtcs as u32 * 4 + num_modes as u32 * 4 + num_clones as u32 * 4 + ((name_len as u32 + 3) & !3)) / 4;
+        let length = (12
+            + num_crtcs as u32 * 4
+            + num_modes as u32 * 4
+            + num_clones as u32 * 4
+            + ((name_len as u32 + 3) & !3))
+            / 4;
 
         let mut reply = vec![1u8];
         reply.push(0); // status = RRSetConfigSuccess
@@ -679,8 +688,8 @@ impl TestServer {
         reply.extend_from_slice(&length.to_le_bytes());
         reply.extend_from_slice(&0u32.to_le_bytes()); // timestamp
         reply.extend_from_slice(&1u32.to_le_bytes()); // crtc = 1
-        reply.extend_from_slice(&((self.width / 4) as u32).to_le_bytes()); // mm_width
-        reply.extend_from_slice(&((self.height / 4) as u32).to_le_bytes()); // mm_height
+        reply.extend_from_slice(&(self.width / 4).to_le_bytes()); // mm_width
+        reply.extend_from_slice(&(self.height / 4).to_le_bytes()); // mm_height
         reply.push(1); // connection = Connected
         reply.push(0); // subpixel_order = Unknown
         reply.extend_from_slice(&num_crtcs.to_le_bytes());
@@ -806,9 +815,7 @@ impl TestServer {
         devices.extend_from_slice(name);
         // Pad to 4-byte boundary
         let pad = (4 - (name.len() % 4)) % 4;
-        for _ in 0..pad {
-            devices.push(0);
-        }
+        devices.extend(std::iter::repeat_n(0u8, pad));
 
         // Master keyboard (device ID 3)
         devices.extend_from_slice(&3u16.to_le_bytes()); // deviceid
@@ -821,9 +828,7 @@ impl TestServer {
         let name = b"Master keyboard";
         devices.extend_from_slice(name);
         let pad = (4 - (name.len() % 4)) % 4;
-        for _ in 0..pad {
-            devices.push(0);
-        }
+        devices.extend(std::iter::repeat_n(0u8, pad));
 
         let length = devices.len() / 4;
 
@@ -1016,7 +1021,7 @@ impl TestServer {
         reply.extend_from_slice(&30u16.to_le_bytes()); // repeatInterval
         reply.extend_from_slice(&300u16.to_le_bytes()); // slowKeysDelay
         reply.extend_from_slice(&300u16.to_le_bytes()); // debounceDelay
-        // End of 32-byte header, now additional data
+                                                        // End of 32-byte header, now additional data
         reply.extend_from_slice(&300u16.to_le_bytes()); // mouseKeysDelay
         reply.extend_from_slice(&50u16.to_le_bytes()); // mouseKeysInterval
         reply.extend_from_slice(&10u16.to_le_bytes()); // mouseKeysTimeToMax
@@ -1030,7 +1035,7 @@ impl TestServer {
         reply.extend_from_slice(&0u32.to_le_bytes()); // accessXTimeoutMask
         reply.extend_from_slice(&0u32.to_le_bytes()); // accessXTimeoutValues
         reply.extend_from_slice(&0u32.to_le_bytes()); // enabledControls
-        // perKeyRepeat (32 bytes)
+                                                      // perKeyRepeat (32 bytes)
         reply.extend_from_slice(&[0xffu8; 32]);
         Ok(reply)
     }
@@ -1104,19 +1109,33 @@ async fn handle_client(mut stream: tokio::net::UnixStream, client_id: u32) {
             }
         };
         pending.extend_from_slice(&buf[..n]);
-        eprintln!("[{}] received {} bytes, pending: {}", client_id, n, pending.len());
+        eprintln!(
+            "[{}] received {} bytes, pending: {}",
+            client_id,
+            n,
+            pending.len()
+        );
 
         loop {
             let needed = if !connected {
                 12 // connection setup
             } else if pending.len() >= 4 {
                 let len = u16::from_le_bytes([pending[2], pending[3]]) as usize * 4;
-                if len == 0 { 4 } else { len }
+                if len == 0 {
+                    4
+                } else {
+                    len
+                }
             } else {
                 4
             };
 
-            eprintln!("[{}]   needed: {} bytes for opcode {}", client_id, needed, if pending.len() > 0 { pending[0] } else { 0 });
+            eprintln!(
+                "[{}]   needed: {} bytes for opcode {}",
+                client_id,
+                needed,
+                if !pending.is_empty() { pending[0] } else { 0 }
+            );
             if pending.len() < needed {
                 break;
             }

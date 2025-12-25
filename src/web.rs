@@ -54,8 +54,7 @@ pub async fn run_web(display_num: u32, port: u16, www_path: Option<&str>) -> Res
     let _ = std::fs::remove_file(&x11_socket);
     std::fs::create_dir_all(X11_UNIX_DIR).ok();
 
-    let unix_listener =
-        UnixListener::bind(&x11_socket).context("failed to create X11 socket")?;
+    let unix_listener = UnixListener::bind(&x11_socket).context("failed to create X11 socket")?;
 
     let tcp_port = X11_TCP_BASE + display_num as u16;
     let tcp_listener = TcpListener::bind(format!("127.0.0.1:{}", tcp_port))
@@ -77,10 +76,13 @@ pub async fn run_web(display_num: u32, port: u16, www_path: Option<&str>) -> Res
 
     // Build router
     let app = Router::new()
-        .route("/ws", get(move |ws: WebSocketUpgrade| {
-            let b = Arc::clone(&bridge_for_ws);
-            async move { ws.on_upgrade(move |socket| handle_websocket(socket, b)) }
-        }))
+        .route(
+            "/ws",
+            get(move |ws: WebSocketUpgrade| {
+                let b = Arc::clone(&bridge_for_ws);
+                async move { ws.on_upgrade(move |socket| handle_websocket(socket, b)) }
+            }),
+        )
         .layer(CorsLayer::permissive());
 
     // Add static file serving
