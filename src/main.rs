@@ -19,6 +19,7 @@
 //! ```
 
 mod display;
+mod gui;
 mod mirror;
 mod rendezvous;
 #[cfg(unix)]
@@ -167,6 +168,10 @@ enum Commands {
         #[arg(long, default_value = "720")]
         height: u32,
     },
+
+    /// GUI mode - opens window with join code input
+    /// Cross-platform graphical interface for connecting to x11q servers
+    Gui,
 }
 
 #[tokio::main]
@@ -214,6 +219,7 @@ async fn main() -> Result<()> {
             width,
             height,
         } => display::run_display(display, width, height).await,
+        Commands::Gui => gui::run_gui(),
     }
 }
 
